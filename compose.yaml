@@ -1,0 +1,27 @@
+name: personal-ai-workspace
+
+services:
+  harness:
+    # Community-maintained image packaging the official @deepseek-ai/dsh runtime.
+    # Review the image source before use; update the pinned tag intentionally.
+    image: ${DSH_IMAGE:-ghcr.io/runzhliu/deepseek-harness:0.2.1-rc.3-r1}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${DSH_PORT:-3080}:3080"
+    environment:
+      DSH_TELEMETRY_DISABLED: "1"
+    volumes:
+      # Sessions, provider settings, managed credentials and DSH profiles.
+      - dsh-home:/home/node/.dsh
+      # Work directory is local to this installation; NOT part of public Git.
+      - ./runtime/workspace:/workspace
+      # Personal Git repo: clone next to workspace-core or set KNOWLEDGE_PATH.
+      - ${KNOWLEDGE_PATH:-../workspace-knowledge}:/workspace/knowledge
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+
+volumes:
+  dsh-home:
