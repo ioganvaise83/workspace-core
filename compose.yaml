@@ -4,7 +4,7 @@ services:
   harness:
     # Community-maintained image packaging the official @deepseek-ai/dsh runtime.
     # Review the image source before use; update the pinned tag intentionally.
-    image: ${DSH_IMAGE:-ghcr.io/runzhliu/deepseek-harness:0.2.1-rc.3-r1}
+    image: ${DSH_IMAGE:-runzhliu/deepseek-harness:0.2.1-rc.3-r1}
     restart: unless-stopped
     ports:
       - "127.0.0.1:${DSH_PORT:-3080}:3080"
