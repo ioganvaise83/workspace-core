@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "comment": "Declarative registry of built-in MCP integrations. scripts/bootstrap-integrations.cjs turns this into the DSH patch overlay at container start.",
+  "integrations": [
+    {
+      "id": "gmail",
+      "enabled": true,
+      "serverName": "gmail",
+      "url": "http://gmail-mcp:8765/mcp",
+      "tokenFile": "gmail-bridge.token",
+      "description": "Read-only Gmail: search, read threads, list labels, download one attachment. Never sends mail."
+    }
+  ]
+}

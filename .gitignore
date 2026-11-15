@@ -18,3 +18,5 @@ Thumbs.db
 .idea/
 .vscode/
 __pycache__/
+**/credentials.json
+**/gcp-oauth.keys.json

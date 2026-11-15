@@ -1,5 +1,12 @@
 name: personal-ai-workspace
 
+# Built-in services of the personal AI platform.
+#
+# Everything a normal user needs comes from `docker compose up -d --build`:
+# the harness plus one container per built-in MCP integration. Integrations are
+# optional at runtime: the harness boots and stays usable while an integration
+# is unconfigured or down.
+
 services:
   harness:
     # Community-maintained image packaging the official @deepseek-ai/dsh runtime.
@@ -7,9 +14,12 @@ services:
     image: ${DSH_IMAGE:-runzhliu/deepseek-harness:0.2.1-rc.3-r1}
     restart: unless-stopped
     ports:
+      # Loopback only. This Web API can execute code.
       - "127.0.0.1:${DSH_PORT:-3080}:3080"
     environment:
       DSH_TELEMETRY_DISABLED: "1"
+      GMAIL_MCP_URL: http://gmail-mcp:8765/mcp
+      INTEGRATIONS_REGISTRY: /workspace/core/integrations/registry.json
     volumes:
       # Sessions, provider settings, managed credentials and DSH profiles.
       - dsh-home:/home/node/.dsh
@@ -17,11 +27,135 @@ services:
       - ./runtime/workspace:/workspace
       # Personal Git repo: clone next to workspace-core or set KNOWLEDGE_PATH.
       - ${KNOWLEDGE_PATH:-../workspace-knowledge}:/workspace/knowledge
+      # Разработка платформы
+      - ./compose.yaml:/workspace/core/compose.yaml
+      - ./integrations:/workspace/core/integrations
+      - ./plugins:/workspace/core/plugins
+      - ./scripts:/workspace/core/scripts
+      - ./docs:/workspace/core/docs
+      - ./.gitignore:/workspace/core/.gitignore
+      - ./README.md:/workspace/core/README.md
+      - ../workspace-apps:/workspace/apps
+      - ./docs/templates/agents/global-AGENTS.md:/home/node/.dsh/AGENTS.md:ro
+    # Registers built-in MCP integrations into the DSH profile, then hands over
+    # to the image's own entrypoint.
+    #
+    # tini is invoked explicitly because overriding `entrypoint` drops the
+    # image's default `tini --` prefix. Without it the harness would run as PID 1
+    # and never reap zombies or forward SIGTERM.
+    #
+    # `web` must be the first argument: the image entrypoint checks `$1 = web`
+    # to decide whether to start the web relay and desktop sidecars.
+    #
+    # Why override at all: dsh has no environment variable for extra patch
+    # overlays, and the image entrypoint accepts none. The bootstrap writes into
+    # the profile's own cordis.patch.yml, which DSH applies automatically — so no
+    # extra `--patch` argument is needed (passing it explicitly would register
+    # every entry twice).
+    #
+    # It runs on every start: idempotent, and it recreates the registration after
+    # `--build`, container recreation, or a fresh dsh-home volume.
+    entrypoint:
+      - /usr/bin/tini
+      - --
+      - /bin/sh
+      - -c
+      - |
+        # Register built-in integrations, then hand over to the image entrypoint.
+        # Best-effort by design: a registration failure must never stop the
+        # harness. The script validates before writing, keeps a backup and exits
+        # 0 on every failure path; `|| true` also covers a deleted script.
+        node /workspace/core/scripts/bootstrap-integrations.cjs || true
+        exec /usr/local/bin/deepseek-harness-entrypoint "$@"
+      - sh
+      - web
+      - --patch
+      - /opt/deepseek-harness/web.cordis.patch.yml
+      - --no-open
+    depends_on:
+      # Only ordering: the token must exist before either container reads it.
+      # No health conditions on purpose — the harness must start even when Gmail
+      # is unconfigured, unhealthy or absent.
+      mcp-token:
+        condition: service_completed_successfully
+      gmail-mcp:
+        condition: service_started
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     pids_limit: 512
+
+  # Built-in integration. Read-only Gmail: search, read threads, list labels,
+  # download one attachment. No tool here can send, reply, forward, draft, label
+  # or delete mail — enforced twice: the OAuth scope, and the --tools allowlist
+  # in integrations/gmail/entrypoint.sh.
+  gmail-mcp:
+    build:
+      context: ./integrations/gmail
+      dockerfile: Dockerfile
+    image: ${GMAIL_MCP_IMAGE:-personal-ai-workspace/gmail-mcp:3.0.0}
+    restart: unless-stopped
+    # No host ports: reachable only from other services on the compose network.
+    expose:
+      - "8765"
+    environment:
+      # Token file written by the bootstrap script onto the dsh-home volume.
+      GMAIL_BRIDGE_TOKEN_FILE: /dsh-home/bootstrap/gmail-bridge.token
+      GMAIL_MCP_EXPORT_REMOTE_IMAGES: "false"
+      GMAIL_MCP_TIMEOUT_MS: "60000"
+      MCP_PORT: "8765"
+      MCP_HOST: "0.0.0.0"
+    volumes:
+      # Bootstrap-generated bridge token, read-only.
+      - dsh-home:/dsh-home:ro
+      # OAuth material stays on the host, outside Git. It is optional: without
+      # it the server still starts and simply has no working Gmail calls.
+      - ${GMAIL_MCP_AUTH_DIR:-./runtime/gmail/oauth}:/home/node/.gmail-mcp:ro
+      # Per-integration local state, outside Git.
+      - ./runtime/gmail/state:/home/node/state
+      - ./runtime/gmail/downloads:/home/node/downloads
+      - ./runtime/gmail/attachments:/home/node/attachments
+    depends_on:
+      mcp-token:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # One-shot helper that mints the shared bridge token onto the dsh-home volume.
+  # It exists because compose starts integrations before the harness, while the
+  # token lives on a volume both share: without this, the very first `up` would
+  # race and gmail-mcp would exit 1 with "no bridge token".
+  mcp-token:
+    image: ${DSH_IMAGE:-runzhliu/deepseek-harness:0.2.1-rc.3-r1}
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/init-token.sh
+    environment:
+      TOKEN_DIR: /dsh-home/bootstrap
+    volumes:
+      - dsh-home:/dsh-home
+      # The script itself lives in the repository, not in the image.
+      - ./scripts/init-token.sh:/usr/local/bin/init-token.sh:ro
+    # Writes to the shared volume, which is owned by the harness uid; running as
+    # root keeps the token readable regardless of how the volume was created.
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
 
 volumes:
   dsh-home:

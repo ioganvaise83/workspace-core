@@ -1,0 +1,27 @@
+# Optional: give this application its own Compose project so it never collides
+# with the platform stack. Run from this directory.
+#
+#   docker compose up -d --build
+#
+# Delete this file if the application does not need Docker.
+
+name: <app-name>
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      # Loopback only unless the app is meant to be reachable from the network.
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    environment:
+      APP_DATA_DIR: /app/runtime
+    volumes:
+      # Local state stays outside Git.
+      - ./runtime:/app/runtime
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
