@@ -1,0 +1,119 @@
+# Copy to `.github/workflows/line-endings.yml` on the host.
+#
+# WHY THIS FILE IS `docs/github-workflow-line-endings.yml`:
+# the repository root is not writable from inside the harness container, the same
+# constraint that puts the environment template at `docs/env.example.txt`.
+#
+#   mkdir -p .github/workflows                                        # bash
+#   cp docs/github-workflow-line-endings.yml .github/workflows/line-endings.yml
+#
+#   New-Item -ItemType Directory -Force .github\workflows | Out-Null   # PowerShell
+#   Copy-Item docs\github-workflow-line-endings.yml .github\workflows\line-endings.yml
+#
+# In PowerShell, `mkdir .github\workflows` on its own is unreliable in a chained
+# one-liner; `New-Item -Force` creates intermediate directories and is idempotent.
+#
+# WHAT IT CATCHES
+# ---------------
+# The failure this prevents is invisible from the error alone:
+#
+#   /usr/local/bin/init-token.sh: 14: set: Illegal option -
+#   service "mcp-token" didn't complete successfully: exit 2
+#
+# A Windows contributor with core.autocrlf=true commits CRLF, /bin/sh (dash)
+# reads `set -eu\r`, and the platform dies on its third service. `eol=lf` in
+# .gitattributes prevents it; this workflow proves the rules are in place and
+# that no file slipped past them.
+#
+# NOTE ON SELF-REFERENCE: `.github/workflows/*.yml` lives inside the repository,
+# so a workflow cannot assume the checker script is healthy — on a broken clone
+# that script is CRLF too and dies with the very error it reports. Job `scan`
+# therefore greps the tracked files directly and does not execute anything from
+# the repository. Job `attributes` then proves the rules, and the last job
+# confirms the script itself is usable.
+
+name: line-endings
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # 1. No committed file that Linux executes may contain a CR. Self-contained on
+  #    purpose: it runs on a checkout that may itself be broken.
+  scan:
+    name: no CRLF in executed files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked shell, Python, Node and Dockerfiles
+        run: |
+          set -eu
+          bad=0
+          for f in $(git ls-files '*.sh' '*.py' '*.cjs' 'Dockerfile' '*.dockerfile'); do
+            [ -f "$f" ] || continue
+            if grep -q "$(printf '\r')" "$f"; then
+              echo "::error file=$f::CRLF line ending; this file is executed inside a Linux container"
+              bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "Fix locally: sh scripts/check-line-endings.sh --fix"
+            exit 1
+          fi
+          echo "No CRLF in executed files."
+
+  # 2. The attributes really produce LF for a Windows user. This reproduces the
+  #    bug: check out with autocrlf=true and assert no CR appears. Without the
+  #    .gitattributes rules this job fails, which is the regression signal.
+  attributes:
+    name: .gitattributes forces LF on a Windows-style clone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The rules must exist
+        run: |
+          set -eu
+          for f in scripts/.gitattributes integrations/.gitattributes; do
+            [ -f "$f" ] || { echo "::error::missing $f"; exit 1; }
+            grep -q 'eol=lf' "$f" || { echo "::error::$f has no eol=lf rule"; exit 1; }
+          done
+          # The root file is recommended rather than required: the two above are
+          # what protect the container-executed scripts. Warn, do not fail.
+          [ -f .gitattributes ] || echo "::warning file=.gitattributes::root rules missing; copy docs/gitattributes.txt"
+
+      - name: Re-clone with core.autocrlf=true
+        run: |
+          set -eu
+          rm -rf /tmp/renormalized
+          git -c core.autocrlf=true clone --quiet . /tmp/renormalized
+          cd /tmp/renormalized
+          bad=0
+          for f in $(git ls-files '*.sh' '*.py' '*.cjs' 'Dockerfile' '*.dockerfile'); do
+            [ -f "$f" ] || continue
+            if grep -q "$(printf '\r')" "$f"; then
+              echo "::error file=$f::CRLF survived an autocrlf=true clone; .gitattributes is missing or ineffective"
+              bad=1
+            fi
+          done
+          exit "$bad"
+
+  # 3. The shipped checker works, so contributors can rely on the --fix path. It
+  #    is split out because it is the one job that depends on the script itself.
+  checker:
+    name: scripts/check-line-endings.sh runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the checker and the preflight
+        run: |
+          set -eu
+          if ! sh scripts/check-line-endings.sh; then
+            echo "::error::checker reported CRLF, or the script itself is CRLF"
+            exit 1
+          fi
+          python3 scripts/check_setup.py || true   # other checks may legitimately be MISSING in CI
