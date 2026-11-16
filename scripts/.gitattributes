@@ -1,0 +1,19 @@
+# Line endings for everything in this directory that an interpreter reads.
+#
+# These scripts are bind-mounted from the Windows host into the harness and run
+# there, so Git's checkout conversion applies to the file the container runs.
+# With core.autocrlf=true (the Windows default) Git rewrites LF to CRLF, and:
+#
+#   /usr/local/bin/init-token.sh: 14: set: Illegal option -   (/bin/sh = dash)
+#   env: 'python3\r': No such file or directory               (direct ./script.py)
+#
+# `eol=lf` overrides core.autocrlf for these files, so a clone behaves the same
+# on Windows and Linux whatever the local Git setting is.
+#
+# The rule lives next to the files because the repository root is not writable
+# from inside the container; docs/gitattributes.txt carries the repository-wide
+# copy for the host.
+
+*.sh text eol=lf
+*.py text eol=lf
+*.cjs text eol=lf

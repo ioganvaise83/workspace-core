@@ -1,0 +1,55 @@
+# Repository-wide line-ending policy for workspace-core.
+#
+# WHY THIS FILE IS `docs/gitattributes.txt` AND NOT `.gitattributes`:
+# the repository root is not writable from inside the harness container, the
+# same constraint that puts the environment template at `docs/env.example.txt`.
+# Copy it into place on the host once:
+#
+#   cp docs/gitattributes.txt .gitattributes        # Linux/macOS
+#   Copy-Item docs\gitattributes.txt .gitattributes # PowerShell
+#
+# It is still safe to commit before the copy: `scripts/.gitattributes` and
+# `integrations/gmail/.gitattributes` already protect the two scripts that are
+# mounted into Linux containers, which is the failure this policy prevents.
+#
+# WHY IT MATTERS:
+# Shell scripts are bind-mounted from the Windows host straight into the
+# container, so Git's checkout conversion applies to the file the container
+# runs. With core.autocrlf=true (the Windows default) Git rewrites LF to CRLF,
+# and /bin/sh (dash) fails with `set: Illegal option -` because it reads
+# `set -eu\r`. `eol=lf` wins over core.autocrlf and makes a clone behave the
+# same on every platform.
+
+* text=auto eol=lf
+
+# Executed by /bin/sh inside a container: a stray CR breaks the interpreter.
+*.sh text eol=lf
+
+# Explicit, so a build never depends on a directory-level default.
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+
+# Run by an interpreter that treats CRLF as a syntax error, and by Node/Git.
+*.py text eol=lf
+*.cjs text eol=lf
+*.mjs text eol=lf
+
+# Data and documentation: normalise so diffs stay readable everywhere.
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Certificates are binary to Git. Normalising a PEM rewrites its base64 body
+# and silently invalidates the certificate, so these must never be touched.
+# The only committed .pem is the zero-byte placeholder that keeps the optional
+# custom-CA secret resolvable; this rule also protects a real one a user
+# mounts from outside the repository.
+*.pem -text
+*.crt -text
+*.p12 -text
+*.pfx -text
+*.key -text

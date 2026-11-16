@@ -32,9 +32,11 @@ scripts/
   bootstrap-integrations.cjs  registers integrations in the DSH profile
   init-token.sh               mints the shared MCP bridge token
   integration-status.sh       layered diagnostics
+  check-line-endings.sh       fails on CRLF in files Linux executes
   check_setup.py              non-destructive preflight
   knowledge_status.py         read-only Git status of the private repo
   apps-registry.cjs           validates and syncs workspace-apps/registry.json
+  .gitattributes              keeps those scripts LF on a Windows clone
 docs/
   architecture.md             boundary and lifecycle decisions
   integrations.md             how to add a built-in integration
@@ -42,6 +44,7 @@ docs/
   app-development.md          mandatory policy for building applications
   agent-development.md        safe development rules
   env.example.txt             documented variables (copy to .env.example)
+  gitattributes.txt           line-ending rules (copy to .gitattributes)
   app-template/               copyable skeleton for a new application
 plugins/                      reusable DSH plugins (installed explicitly)
 ```
@@ -61,7 +64,21 @@ optional, for the preflight scripts.
      workspace-apps/          # one subdirectory per application
    ```
 
-2. Optionally copy `.env.example` to `.env` and adjust. **Every variable has a
+2. On Windows, install the line-ending rules before anything else. Git rewrites
+   LF to CRLF on checkout when `core.autocrlf=true`, which is the default there,
+   and the shell scripts below are mounted straight into Linux containers:
+
+   ```powershell
+   Copy-Item docs\gitattributes.txt .gitattributes
+   git add .gitattributes
+   git commit -m "chore: line-ending rules"
+   ```
+
+   This is already safe without the copy — `scripts/.gitattributes` and
+   `integrations/.gitattributes` protect the executed files — but the root file
+   covers `compose.yaml`, Python and Node sources too.
+
+3. Optionally copy `.env.example` to `.env` and adjust. **Every variable has a
    working default**, so an empty `.env` is valid. Keep `.env` untracked.
 
    ```bash
@@ -69,12 +86,12 @@ optional, for the preflight scripts.
    Copy-Item .env.example .env   # PowerShell
    ```
 
-3. Make sure `KNOWLEDGE_PATH` (default `../workspace-knowledge`) points at your
+4. Make sure `KNOWLEDGE_PATH` (default `../workspace-knowledge`) points at your
    private repository and `APPS_PATH` (default `../workspace-apps`) at your
    applications directory. Both must exist before launching: Docker creates a
    missing bind source as an empty root-owned directory instead of failing.
 
-4. Create the local runtime directories so Docker does not create them as root:
+5. Create the local runtime directories so Docker does not create them as root:
 
    ```bash
    mkdir -p runtime/workspace runtime/gmail/state runtime/gmail/downloads runtime/gmail/attachments
@@ -85,9 +102,9 @@ optional, for the preflight scripts.
      ForEach-Object { New-Item -ItemType Directory -Force "runtime/$_" }
    ```
 
-5. Optional preflight: `python scripts/check_setup.py`
+6. Optional preflight: `python scripts/check_setup.py`
 
-6. Validate and start:
+7. Validate and start:
 
    ```bash
    docker compose config --quiet
@@ -95,12 +112,12 @@ optional, for the preflight scripts.
    docker compose logs --tail=50 harness
    ```
 
-7. Open **http://127.0.0.1:3080** on the same machine. In Harness go to
+8. Open **http://127.0.0.1:3080** on the same machine. In Harness go to
    **Settings → Models → Add model provider → Custom model API**, enter your
    router's endpoint, protocol (typically OpenAI Chat Completions), credential and
    exact model ID. Save and select it.
 
-8. Ask Harness to read `/workspace/knowledge/AGENTS.md` and, for example,
+9. Ask Harness to read `/workspace/knowledge/AGENTS.md` and, for example,
    `/workspace/knowledge/knowledge/vehicles/`. Auto-loading `AGENTS.md` is **not**
    configured at this stage; opening it is explicit.
 
@@ -172,6 +189,98 @@ docker compose exec harness /workspace/core/scripts/integration-status.sh
 It reports four independent layers — bridge reachability, tool registration,
 Gmail API authorization, DSH registration — and exits non-zero if any fails.
 `/healthz` alone proves only that the gateway is up, not that Gmail works.
+
+## Line endings (Windows)
+
+Shell scripts here are bind-mounted from the host straight into Linux
+containers, so the line endings that Git writes on checkout are part of the
+runtime contract, not a formatting preference. With `core.autocrlf=true` — the
+default on Windows — `compose.yaml` starts failing at the third service:
+
+```text
+/usr/local/bin/init-token.sh: 14: set: Illegal option -
+service "mcp-token" didn't complete successfully: exit 2
+```
+
+`/bin/sh` is dash in these images. It reads `set -eu\r` and treats `\r` as an
+option letter, so it rejects a command that is perfectly valid. Nothing in that
+message mentions line endings.
+
+The repository carries `.gitattributes` rules, which override `core.autocrlf`,
+so a clone is correct on every platform without touching the local Git config:
+
+| File | Scope |
+|---|---|
+| `docs/gitattributes.txt` | repository-wide; copy to `.gitattributes` in the root, which is not writable from the container |
+| `scripts/.gitattributes` | `*.sh`, `*.py`, `*.cjs` in `scripts/` |
+| `integrations/.gitattributes` | every integration's `*.sh` and `Dockerfile`, including ones added later |
+
+A checkout is already correct with only the two directory-level files, because
+they cover every file that a Linux container executes. The root file extends the
+same rule to `compose.yaml` and the remaining sources.
+
+Check, and repair, at any time:
+
+```bash
+sh scripts/check-line-endings.sh        # exit 1 and a file list on CRLF
+sh scripts/check-line-endings.sh --fix  # rewrite those files as LF
+```
+
+The same check runs inside `python scripts/check_setup.py`, so the preflight step
+above reports it before `docker compose up` ever starts a container.
+
+To fix an existing clone once and for all, re-checkout the affected files.
+Committing `.gitattributes` is not enough: it changes how Git writes files from
+now on, but a file already on disk keeps its CRLF, and that copy is what Docker
+mounts.
+
+```bash
+cp docs/gitattributes.txt .gitattributes
+git add .gitattributes && git commit -m "chore: line-ending rules"
+
+# Re-checkout only the executable files, so unrelated edits survive.
+git ls-files '*.sh' '*.py' '*.cjs' Dockerfile | while IFS= read -r f; do
+  rm -f "$f" && git checkout -- "$f"
+done
+```
+
+On Windows, do not reach for `git add --renormalize .` expecting this to be
+fixed: it rewrites the *index* for files Git already tracks and does not stage
+new files, so it neither adds `.gitattributes` nor touches your working tree.
+`git reset --hard` would work but discards any uncommitted work, which is why
+the loop above is surgical.
+
+Simpler alternative if your working tree is clean:
+
+```bash
+sh scripts/check-line-endings.sh --fix
+```
+
+If that command prints `set: Illegal option -` or `syntax error near unexpected
+token`, the checker script itself arrived with CRLF and cannot repair anything —
+including itself. Use the `git ls-files` loop above in that case; it does not
+depend on any script being readable.
+
+`--fix` rewrites files in place and keeps their inode, which matters for the
+single-file bind mounts (`compose.yaml`, `README.md`): replacing the inode would
+detach the host file from the running container.
+
+CI runs the same checks. The workflow ships as a template because the root is not
+writable from the container; install it once on the host:
+
+```bash
+mkdir -p .github/workflows
+cp docs/github-workflow-line-endings.yml .github/workflows/line-endings.yml
+```
+
+```powershell
+New-Item -ItemType Directory -Force .github\workflows | Out-Null
+Copy-Item docs\github-workflow-line-endings.yml .github\workflows\line-endings.yml
+```
+
+It has three jobs: one greps tracked files without executing anything from the
+repository (a broken clone cannot report on itself), one re-clones with
+`core.autocrlf=true` and asserts LF survives, and one runs the checker script.
 
 ## Corporate TLS inspection (optional)
 

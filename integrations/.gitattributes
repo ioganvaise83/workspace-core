@@ -1,0 +1,15 @@
+# Line endings for everything executed inside a Linux container.
+#
+# Every integration's image mounts a script from the Windows host and runs it
+# with /bin/sh, so a CRLF checkout fails at startup with:
+#
+#   ./entrypoint.sh: N: set: Illegal option -
+#
+# core.autocrlf=true (the Windows default) rewrites LF to CRLF on checkout.
+# `eol=lf` overrides that regardless of the local Git setting. The rule covers
+# this directory and every integration added later, so a new integration does
+# not have to remember it.
+
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
