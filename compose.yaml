@@ -29,6 +29,9 @@ services:
       - ${KNOWLEDGE_PATH:-../workspace-knowledge}:/workspace/knowledge
       # Applications: clone next to workspace-core or set APPS_PATH.
       - ${APPS_PATH:-../workspace-apps}:/workspace/apps
+      # Optional corporate CA for outbound HTTPS (model API endpoints). Empty by
+      # default; the entrypoint exports NODE_EXTRA_CA_CERTS only when non-empty.
+      - ${CUSTOM_CA_PATH:-./integrations/ca/empty-ca.pem}:/home/node/custom-ca.pem:ro
       # Разработка платформы
       - ./compose.yaml:/workspace/core/compose.yaml
       - ./integrations:/workspace/core/integrations
@@ -67,6 +70,14 @@ services:
         # harness. The script validates before writing, keeps a backup and exits
         # 0 on every failure path; `|| true` also covers a deleted script.
         node /workspace/core/scripts/bootstrap-integrations.cjs || true
+        # Optional corporate CA for outbound HTTPS (model API endpoints behind
+        # the same inspecting proxy). The bind mount always exists, so -f -s is
+        # what separates a real certificate from the zero-byte placeholder: a
+        # directory would pass -s alone and break Node. Verification stays on.
+        if [ -f /home/node/custom-ca.pem ] && [ -s /home/node/custom-ca.pem ]; then
+          NODE_EXTRA_CA_CERTS=/home/node/custom-ca.pem
+          export NODE_EXTRA_CA_CERTS
+        fi
         exec /usr/local/bin/deepseek-harness-entrypoint "$@"
       - sh
       - web
@@ -95,6 +106,12 @@ services:
     build:
       context: ./integrations/gmail
       dockerfile: Dockerfile
+      # npm install runs behind the corporate TLS-inspecting proxy, so the CA is
+      # needed while the layer is built and nowhere afterwards. Requires BuildKit
+      # (the default in Docker Desktop and Compose v2); the classic builder
+      # rejects build secrets outright.
+      secrets:
+        - custom-ca
     image: ${GMAIL_MCP_IMAGE:-personal-ai-workspace/gmail-mcp:3.0.0}
     restart: unless-stopped
     # No host ports: reachable only from other services on the compose network.
@@ -117,6 +134,9 @@ services:
       - ./runtime/gmail/state:/home/node/state
       - ./runtime/gmail/downloads:/home/node/downloads
       - ./runtime/gmail/attachments:/home/node/attachments
+      # Optional corporate CA for outbound HTTPS. Empty by default; the
+      # entrypoint exports NODE_EXTRA_CA_CERTS only when the file is non-empty.
+      - ${CUSTOM_CA_PATH:-./integrations/ca/empty-ca.pem}:/home/node/custom-ca.pem:ro
     depends_on:
       mcp-token:
         condition: service_completed_successfully
@@ -157,6 +177,17 @@ services:
     cap_drop:
       - ALL
     restart: "no"
+
+# Optional corporate CA (TLS inspection: Kaspersky, Zscaler, a proxy).
+#
+# The default source is a zero-byte placeholder committed to this repository, so
+# the build works untouched for everyone. Set CUSTOM_CA_PATH in `.env` to a PEM
+# on the host to use a real certificate. It is never copied into the repository,
+# never sent to a registry, and never stored in an image layer: BuildKit mounts
+# it for the duration of one RUN and drops it afterwards.
+secrets:
+  custom-ca:
+    file: ${CUSTOM_CA_PATH:-./integrations/ca/empty-ca.pem}
 
 volumes:
   dsh-home:

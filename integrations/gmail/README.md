@@ -360,6 +360,42 @@ through a `-K` config file on stdin, so it never appears in the process table,
 in logs, or in the report. The diagnostic prints tool names and label counts
 only — never message content, never the token.
 
+## Corporate TLS inspection (optional)
+
+A proxy that re-signs HTTPS — Kaspersky Endpoint Security, Zscaler, a corporate
+gateway — makes `npm install` fail with `SELF_SIGNED_CERT_IN_CHAIN` while the
+image is built, and can also break the Gmail API calls afterwards.
+
+Both are handled by one host setting, `CUSTOM_CA_PATH` in `compose.yaml`'s
+`.env`. It is unset by default and nothing changes when it is.
+
+| Stage | Mechanism | Lifetime |
+|---|---|---|
+| `npm install` | BuildKit secret `custom-ca`, mounted at `/run/secrets/custom-ca` | one `RUN`; in no layer |
+| Runtime | `NODE_EXTRA_CA_CERTS=/home/node/custom-ca.pem` | process lifetime |
+
+The certificate is never `COPY`-ed, never an `ARG`, and never committed: the
+repository contains only `integrations/ca/empty-ca.pem`, a zero-byte placeholder
+that keeps the secret source resolvable for users without inspection.
+
+Verification is never weakened. `NODE_EXTRA_CA_CERTS` adds a root to the store;
+it does not disable checks or make every host trusted. `strict-ssl=false` and
+`NODE_TLS_REJECT_UNAUTHORIZED=0` are absent on purpose and should stay absent —
+either one disables verification for every host, which turns the container into
+an open target for anyone on the network path.
+
+The guard is `[ -f X ] && [ -s X ]`, not `-s` alone: a mistyped
+`CUSTOM_CA_PATH` makes Docker create a *directory* as the bind source, and a
+directory passes `-s` while making Node fail at startup.
+
+To confirm the CA is actually in use, check the container log at start:
+
+```bash
+docker compose logs gmail-mcp | grep "trusting extra CA"
+```
+
+No such line means the file was empty, missing, or not a regular file.
+
 ## Operational notes
 
 - Container runs as the unprivileged `node` user with `read_only: true`,

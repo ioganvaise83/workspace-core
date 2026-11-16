@@ -173,6 +173,50 @@ It reports four independent layers — bridge reachability, tool registration,
 Gmail API authorization, DSH registration — and exits non-zero if any fails.
 `/healthz` alone proves only that the gateway is up, not that Gmail works.
 
+## Corporate TLS inspection (optional)
+
+If a proxy re-signs HTTPS traffic — Kaspersky Endpoint Security, Zscaler, most
+corporate gateways — `npm install` during the `gmail-mcp` build fails with
+`SELF_SIGNED_CERT_IN_CHAIN`. The platform does not weaken TLS to work around it.
+It trusts one extra root certificate instead, and only when you ask it to.
+
+1. Export the inspecting root certificate as PEM on the host, outside this
+   repository. Kaspersky: **Settings → Network settings → Encrypted connections
+   scanning → View certificates → Export**. Take the root, not a leaf.
+2. Point `CUSTOM_CA_PATH` at it in `.env`, using forward slashes on Windows:
+
+   ```dotenv
+   CUSTOM_CA_PATH=C:/Users/you/kaspersky-ca.pem
+   ```
+
+3. Rebuild: `docker compose build --no-cache gmail-mcp && docker compose up -d`.
+
+The certificate is used three ways, all read-only and none of them in Git:
+
+| Where | What it does |
+|---|---|
+| `gmail-mcp` build | mounted as a BuildKit secret for the `npm install` RUN only; it is in no image layer |
+| `gmail-mcp` runtime | `NODE_EXTRA_CA_CERTS`, so Gmail API calls succeed through the proxy |
+| `harness` runtime | `NODE_EXTRA_CA_CERTS`, so model API endpoints behind the same proxy work |
+
+Leave `CUSTOM_CA_PATH` unset and everything behaves exactly as before: the
+default is a zero-byte placeholder, which the entrypoints detect with
+`[ -f X ] && [ -s X ]` and ignore.
+
+Notes:
+
+- `NODE_EXTRA_CA_CERTS` **adds** a root; it never removes or bypasses one.
+  `strict-ssl=false` and `NODE_TLS_REJECT_UNAUTHORIZED=0` appear nowhere and
+  must not be added — they would disable verification for every host.
+- Build secrets need BuildKit, the default in Docker Desktop and Compose v2. If
+  the build says the classic builder does not support secrets, unset
+  `DOCKER_BUILDKIT=0` and ensure the `buildx` plugin is installed.
+- Verifying trust without Docker: `docker compose run --rm gmail-mcp node -e
+  "require('https').get('https://registry.npmjs.org',r=>console.log(r.statusCode))"`.
+- A certificate that is a leaf, expired, or in DER rather than PEM produces the
+  same error as no certificate at all. Confirm with
+  `openssl x509 -in your-ca.pem -noout -subject`.
+
 ## Security limits
 
 - The Web UI is bound to host loopback. Do not expose port 3080 without

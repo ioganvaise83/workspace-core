@@ -19,6 +19,19 @@ set -eu
 : "${MCP_PORT:=8765}"
 : "${MCP_HOST:=0.0.0.0}"
 
+# Corporate TLS inspection: trust one extra root, but only when one was mounted.
+# The bind mount always exists (a zero-byte placeholder by default), so an empty
+# file means "no custom CA" and the image's own trust store is used unchanged.
+#
+# Both -f and -s are required: a misconfigured CUSTOM_CA_PATH makes Docker create
+# a *directory* as the bind source, and a directory passes -s while failing Node.
+# TLS verification is never disabled; this only adds a root.
+if [ -f "${CUSTOM_CA_FILE:-/home/node/custom-ca.pem}" ] && [ -s "${CUSTOM_CA_FILE:-/home/node/custom-ca.pem}" ]; then
+  NODE_EXTRA_CA_CERTS="${CUSTOM_CA_FILE:-/home/node/custom-ca.pem}"
+  export NODE_EXTRA_CA_CERTS
+  echo "gmail-mcp: trusting extra CA from $NODE_EXTRA_CA_CERTS"
+fi
+
 # The bridge token is minted by the bootstrap script on the dsh-home volume and
 # mounted read-only here. An explicit SUPERGATEWAY_API_KEY wins if provided.
 if [ -z "${SUPERGATEWAY_API_KEY:-}" ] && [ -n "${GMAIL_BRIDGE_TOKEN_FILE:-}" ] && [ -r "${GMAIL_BRIDGE_TOKEN_FILE}" ]; then

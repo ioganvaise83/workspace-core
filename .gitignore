@@ -12,6 +12,9 @@ secrets/
 *.key
 *.p12
 *.pfx
+# The only tracked .pem is the zero-byte placeholder that keeps the optional
+# custom-CA build secret resolvable. It contains no certificate.
+!integrations/ca/empty-ca.pem
 # Editor / OS
 .DS_Store
 Thumbs.db
