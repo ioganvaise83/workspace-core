@@ -25,9 +25,11 @@ On the host the three sit side by side:
   workspace-apps/        # one subdirectory per application
 ```
 
-`workspace-apps` is deliberately **not** mounted into the harness today. An
-application is developed by the agent only after its directory is explicitly
-added to Compose as a bind mount — an intentional, reviewable act, not a default.
+`workspace-apps` is mounted into the harness at `/workspace/apps`; the host path
+comes from `APPS_PATH` in `.env`, defaulting to `../workspace-apps` beside this
+repository. Mounting is not creation: the directory and its `registry.json` must
+already exist, otherwise Docker creates an empty root-owned directory and the
+registry tool has nothing to read.
 
 ## What an application is
 
@@ -130,8 +132,7 @@ complexity. A plain manifest scan answers every question asked so far.
 
 ## The directory exists
 
-`workspace-apps` is mounted into the harness at `/workspace/apps` (see
-`compose.yaml`). The concrete layout is:
+The layout inside `workspace-apps` is:
 
 ```text
 workspace-apps/

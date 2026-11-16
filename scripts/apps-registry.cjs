@@ -109,8 +109,11 @@ function parseArgs(argv) {
 function resolveRoot(explicit) {
   if (explicit) return path.resolve(explicit);
   if (process.env.APPS_ROOT) return path.resolve(process.env.APPS_ROOT);
-  // Inside the harness, apps live at /workspace/apps.
-  if (fs.existsSync('/workspace/apps/registry.json')) return '/workspace/apps';
+  // Inside the harness, apps live at /workspace/apps. Test the directory, not
+  // registry.json: an empty mount must still resolve here, so the error below
+  // can name the real cause instead of pointing at a sibling path that no
+  // longer describes this installation.
+  if (fs.existsSync('/workspace/apps')) return '/workspace/apps';
   // On the host the script lives in workspace-core/scripts.
   return path.resolve(__dirname, '..', '..', 'workspace-apps');
 }
@@ -429,6 +432,19 @@ function main() {
 
   if (!fs.existsSync(registryFile)) {
     process.stderr.write(`apps-registry: no registry.json at ${registryFile}\n`);
+    // An empty apps directory almost always means the bind mount resolved to a
+    // host path that does not exist: Docker creates it empty instead of failing.
+    // Say that, rather than leaving the caller to guess.
+    let empty = false;
+    try {
+      empty = fs.readdirSync(root).filter((n) => n !== '.gitkeep').length === 0;
+    } catch { /* the directory itself is missing */ }
+    if (empty) {
+      const hint = root === '/workspace/apps'
+        ? 'the mount is empty: set APPS_PATH in .env and create that directory on the host'
+        : 'the directory is empty: create registry.json there or pass --root';
+      process.stderr.write(`apps-registry: hint: ${hint}\n`);
+    }
     return 2;
   }
 

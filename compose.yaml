@@ -27,6 +27,8 @@ services:
       - ./runtime/workspace:/workspace
       # Personal Git repo: clone next to workspace-core or set KNOWLEDGE_PATH.
       - ${KNOWLEDGE_PATH:-../workspace-knowledge}:/workspace/knowledge
+      # Applications: clone next to workspace-core or set APPS_PATH.
+      - ${APPS_PATH:-../workspace-apps}:/workspace/apps
       # Разработка платформы
       - ./compose.yaml:/workspace/core/compose.yaml
       - ./integrations:/workspace/core/integrations
@@ -35,7 +37,6 @@ services:
       - ./docs:/workspace/core/docs
       - ./.gitignore:/workspace/core/.gitignore
       - ./README.md:/workspace/core/README.md
-      - ../workspace-apps:/workspace/apps
       - ./docs/templates/agents/global-AGENTS.md:/home/node/.dsh/AGENTS.md:ro
     # Registers built-in MCP integrations into the DSH profile, then hands over
     # to the image's own entrypoint.

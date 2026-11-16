@@ -51,12 +51,14 @@ plugins/                      reusable DSH plugins (installed explicitly)
 Requires Docker Desktop or Docker Engine + Compose v2, and Git. Python 3.10+ is
 optional, for the preflight scripts.
 
-1. Clone this repository and your private knowledge repository next to each other:
+1. Clone this repository and your private knowledge repository next to each
+   other, and create the applications directory beside them:
 
    ```text
    ~/ai/
      workspace-core/
      workspace-knowledge/
+     workspace-apps/          # one subdirectory per application
    ```
 
 2. Optionally copy `.env.example` to `.env` and adjust. **Every variable has a
@@ -68,7 +70,9 @@ optional, for the preflight scripts.
    ```
 
 3. Make sure `KNOWLEDGE_PATH` (default `../workspace-knowledge`) points at your
-   private repository. The directory must exist before launching.
+   private repository and `APPS_PATH` (default `../workspace-apps`) at your
+   applications directory. Both must exist before launching: Docker creates a
+   missing bind source as an empty root-owned directory instead of failing.
 
 4. Create the local runtime directories so Docker does not create them as root:
 

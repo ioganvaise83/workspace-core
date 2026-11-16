@@ -19,16 +19,24 @@ knowledge = Path(knowledge_raw).expanduser()
 if not knowledge.is_absolute():
     knowledge = root / knowledge
 knowledge = knowledge.resolve()
+apps_raw = os.environ.get('APPS_PATH', values.get('APPS_PATH', '../workspace-apps'))
+apps = Path(apps_raw).expanduser()
+if not apps.is_absolute():
+    apps = root / apps
+apps = apps.resolve()
 checks = [
     ('Compose file', (root / 'compose.yaml').is_file()),
     ('.env exists', env_file.is_file()),
     ('Private knowledge directory', knowledge.is_dir()),
     ('Private knowledge AGENTS.md', (knowledge / 'AGENTS.md').is_file()),
     ('Private knowledge vehicle notes', (knowledge / 'knowledge' / 'vehicles').is_dir()),
+    ('Applications directory', apps.is_dir()),
+    ('Applications registry', (apps / 'registry.json').is_file()),
     ('Runtime workspace directory', (root / 'runtime' / 'workspace').is_dir()),
 ]
 for name, ok in checks:
     print(f"{'OK' if ok else 'MISSING'}  {name}")
 print('Knowledge path:', knowledge)
+print('Applications path:', apps)
 print('Next: docker compose config && docker compose up -d')
 sys.exit(0 if all(ok for _, ok in checks) else 1)
