@@ -30,8 +30,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { loadAccounts, describeAccount } from './config.js';
-import { AccountPool, ACCOUNT_STATUS } from './accounts.js';
-import { MailError } from './errors.js';
+import { AccountPool, ACCOUNT_STATUS, INBOX_STATUS } from './accounts.js';
+import { MailError, toMailError } from './errors.js';
 import { ArgumentError, resolveToolCall, toolList } from './tools.js';
 import {
   listFolders,
@@ -237,9 +237,11 @@ function fail(error, tool, started) {
     : error instanceof ArgumentError || (error && error.code === 'INVALID_ARGUMENT')
       ? new MailError('INVALID_ARGUMENT', error.message)
       : new MailError('INTERNAL', 'The read-only mail server could not complete the call');
+  const layer = mail.details && typeof mail.details.layer === 'string' ? mail.details.layer : null;
   log('warn', 'tool_error', {
     tool,
     code: mail.code,
+    layer,
     account: mail.accountId,
     message: mail.message,
     ms: Date.now() - started,
@@ -253,6 +255,10 @@ function fail(error, tool, started) {
         message: mail.message,
         account_id: mail.accountId,
         retryable: mail.retryable,
+        // WHERE it failed: dns | tcp | tls | auth | timeout | command_policy |
+        // protocol. Without it, a caller (and a diagnosis script) can only guess,
+        // and guessing is how a guard refusal got reported as a dead server.
+        layer,
       },
     },
   };
@@ -310,7 +316,13 @@ const HANDLERS = {
       const state = active.statusOf(account.id);
       return {
         ...describeAccount(account),
+        // TWO fields on purpose. `connection_status` is the transport/auth state
+        // of the last attempt; `inbox_status` is whether a mailbox was actually
+        // opened. Reporting only the first is what made a broken account look
+        // READY, so both are always present and `notice` spells out the rule.
         connection_status: state.status,
+        inbox_status: state.inboxStatus,
+        failure_layer: state.layer,
         last_error: state.error,
         last_checked_at: state.checkedAt,
         latency_ms: state.latencyMs,
@@ -320,12 +332,16 @@ const HANDLERS = {
     const invalid = active.configErrors.map((error) => ({
       account_id: error.id,
       connection_status: ACCOUNT_STATUS.DISABLED,
+      inbox_status: 'NOT_CHECKED',
       last_error: error.message,
     }));
     return {
       accounts,
       invalid_accounts: invalid,
       configured: accounts.length,
+      // Stated in the payload because it is the single most misread field.
+      status_semantics:
+        'connection_status: READY means a TLS session was established and the credentials were accepted; it does NOT prove INBOX is readable. Check inbox_status: VERIFIED means a mailbox was opened successfully, FAILED means it was refused, NOT_CHECKED means no mailbox has been opened yet.',
       // Explicit: an empty list is a valid, working state, not an error.
       notice: accounts.length === 0
         ? 'No IMAP accounts are configured. Add entries to the accounts file and restart the mail-imap-mcp service.'
@@ -350,36 +366,91 @@ const HANDLERS = {
 
   'mail_get_account_status': makeToolHandler('mail_get_account_status', async ({ accountId }) => {
     const account = getPool().get(accountId);
+    // ONE session, and it opens the default mailbox. That is deliberate: this
+    // tool is what an owner runs to answer "does mail actually work?", so it must
+    // end in a real EXAMINE rather than in a folder listing that merely proves
+    // the server answered. A listing cannot tell READY from readable; an open can.
+    let folders = null;
+    let inbox = null;
+    let sessionError = null;
+    let caps = null;
+    try {
+      inbox = await getPool().withMailbox(accountId, account.defaultFolder, async ({ client, capabilities }) => {
+        caps = capabilities;
+        folders = await listFolderRecords(client);
+        return {
+          inbox_status: INBOX_STATUS.VERIFIED,
+          inbox: client.mailbox.readOnly === true,
+          uidValidity: client.mailbox.uidValidity === undefined ? null : String(client.mailbox.uidValidity),
+          error: null,
+        };
+      });
+    } catch (error) {
+      const mapped = toMailError(error, accountId);
+      sessionError = mapped;
+      const state = getPool().statusOf(accountId);
+      inbox = {
+        inbox_status: state.inboxStatus,
+        inbox: false,
+        uidValidity: null,
+        error: mapped.code,
+      };
+      // Folder discovery is a second chance, on a fresh session, only when the
+      // first one failed AFTER authenticating: a failed session yields no layout,
+      // and the owner still deserves to see what the server declares. An auth or
+      // transport failure would just fail again, so it is not retried.
+      if (mapped.code !== 'AUTH_FAILED' && mapped.code !== 'CONNECTION_FAILED' && mapped.code !== 'TLS_FAILED' && mapped.code !== 'CONNECTION_TIMEOUT') {
+        try {
+          folders = await getPool().withSession(accountId, async ({ client, capabilities }) => {
+            caps = capabilities;
+            return listFolderRecords(client);
+          });
+        } catch {
+          folders = null;
+        }
+      }
+    }
     const state = getPool().statusOf(accountId);
-    return getPool().withSession(accountId, async ({ client, capabilities }) => {
-      const folders = await listFolderRecords(client);
-      return {
-        ...describeAccount(account),
-        connection_status: state.status,
-        last_error: state.error,
-        last_checked_at: state.checkedAt,
-        capabilities: {
-          move: capabilities.move,
-          gmail_extensions: capabilities.gmailExtensions,
-          uid_plus: capabilities.uidPlus,
-          condstore: capabilities.condstore,
-          special_use: capabilities.specialUse,
-          auth_method: capabilities.authMethod,
-        },
-        layout: describeLayout({
+    return {
+      ...describeAccount(account),
+      connection_status: state.status,
+      inbox_status: inbox.inbox_status,
+      failure_layer: state.layer,
+      last_error: sessionError ? `${sessionError.code}${state.layer ? ` (${state.layer})` : ''}` : state.error,
+      last_checked_at: state.checkedAt,
+      inbox: {
+        readable: inbox.inbox_status === INBOX_STATUS.VERIFIED,
+        opened_read_only: inbox.inbox === true,
+        uid_validity: inbox.uidValidity,
+        error: inbox.error,
+      },
+      capabilities: caps
+        ? {
+          move: caps.move,
+          gmail_extensions: caps.gmailExtensions,
+          uid_plus: caps.uidPlus,
+          condstore: caps.condstore,
+          special_use: caps.specialUse,
+          auth_method: caps.authMethod,
+        }
+        : null,
+      // Null when the session could not even list folders, never a fabricated
+      // layout: a caller planning an action must see "unknown", not "empty".
+      layout: folders
+        ? describeLayout({
           folders,
           provider: account.provider,
-          gmailExtensions: capabilities.gmailExtensions,
+          gmailExtensions: caps ? caps.gmailExtensions : false,
           configuredArchivePath: account.archivePath,
           configuredTrashPath: account.trashPath,
-        }),
-        // Stated explicitly so a caller can plan before calling, rather than
-        // discovering a missing folder after approval.
-        write_actions: account.allowWrites
-          ? ['mark_read', 'mark_unread', 'archive', 'move_to_folder', 'add_label', 'remove_label', 'move_to_trash']
-          : [],
-      };
-    });
+        })
+        : null,
+      // Stated explicitly so a caller can plan before calling, rather than
+      // discovering a missing folder after approval.
+      write_actions: account.allowWrites
+        ? ['mark_read', 'mark_unread', 'archive', 'move_to_folder', 'add_label', 'remove_label', 'move_to_trash']
+        : [],
+    };
   }),
 
   'mail_list_labels': makeToolHandler('mail_list_labels', async ({ accountId }) => listLabels(getPool(), accountId)),

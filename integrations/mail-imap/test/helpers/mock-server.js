@@ -47,10 +47,91 @@ function generateCertificate(dir) {
 }
 
 /**
+ * A legacy XLIST plugin, imitating Yandex and Mail.ru.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * Those providers advertise the Gmail-era `XLIST` extension and NOT RFC 6154
+ * `SPECIAL-USE`, and imapflow 2.12.1 picks the listing verb from exactly that:
+ *
+ *     const listCommand = connection.capabilities.has('XLIST') &&
+ *         !hasCapability(connection, 'SPECIAL-USE') ? 'XLIST' : 'LIST';
+ *
+ * So a server that advertises XLIST forces the client to send XLIST, which is how
+ * the command-policy bug turned into "Yandex is unreachable". A real server that
+ * behaves this way is the only way to test the fix at the interception layer:
+ * a test that merely calls exec('XLIST') would prove the allowlist entry exists
+ * but not that imapflow actually produces that command.
+ *
+ * The plugin answers `XLIST` with `* XLIST (<flags>) "<delimiter>" "<name>"`
+ * lines for every mailbox, and tags INBOX with \Inbox as the extension specifies.
+ *
+ * @param {object} server imapkit server instance
+ */
+function xlistPlugin(server) {
+  server.registerCapability('XLIST');
+  const coreList = server.getCommandHandler('LIST');
+  server.setCommandHandler('XLIST', (connection, parsed, data, callback) => {
+    // Validate the two astring arguments exactly as LIST does, so a malformed
+    // command fails the same way and the client sees a real protocol error.
+    if (
+      !parsed.attributes ||
+      parsed.attributes.length !== 2 ||
+      ['STRING', 'LITERAL', 'ATOM'].indexOf(parsed.attributes[0] && parsed.attributes[0].type) < 0 ||
+      ['STRING', 'LITERAL', 'ATOM'].indexOf(parsed.attributes[1] && parsed.attributes[1].type) < 0
+    ) {
+      connection.send(
+        { tag: parsed.tag, command: 'BAD', attributes: [{ type: 'TEXT', value: 'XLIST expects 2 string arguments' }] },
+        'INVALID COMMAND',
+        parsed,
+        data,
+      );
+      return callback();
+    }
+    const folders = server.matchFolders(
+      parsed.attributes[0].value,
+      parsed.attributes[1].value,
+      (mailboxPath) => connection.exportMailboxName(mailboxPath),
+    );
+    for (const folder of folders) {
+      const flags = [].concat(folder.flags || []);
+      // The XLIST convention: INBOX is distinguished by the \Inbox flag.
+      if (String(folder.path).toUpperCase() === 'INBOX') flags.push('\\Inbox');
+      connection.send(
+        {
+          tag: '*',
+          command: 'XLIST',
+          attributes: [
+            flags.map((flag) => ({ type: 'ATOM', value: flag })),
+            server.getSeparator(folder),
+            connection.exportMailboxName(folder.path),
+          ],
+        },
+        'XLIST ITEM',
+        parsed,
+        data,
+        folder,
+      );
+    }
+    connection.send(
+      { tag: parsed.tag, command: 'OK', attributes: [{ type: 'TEXT', value: 'Completed' }] },
+      'XLIST',
+      parsed,
+      data,
+    );
+    return callback();
+  });
+  // LIST stays available for clients that do not care about XLIST.
+  server.setCommandHandler('LIST', coreList);
+}
+
+/**
  * Start a mock IMAP server with implicit TLS.
  *
  * @param {object} [options]
  * @param {Record<string, object>} [options.storage] mailbox tree
+ * @param {boolean} [options.xlist] advertise legacy XLIST and withhold SPECIAL-USE,
+ *   the way Yandex and Mail.ru do
  * @param {(ctx: {server: object, cert: Buffer, port: number, tempDir: string, commands: () => object[], flagsOf: (mailbox: string, uid: number) => string[]|null, stop: () => Promise<void>}) => Promise<void>} [options.run]
  * @returns {Promise<object>} harness handle
  */
@@ -62,6 +143,11 @@ export async function startMockServer(options = {}) {
   // A test may set its own password so a run can prove that a REAL secret value
   // never reaches the logs; the default keeps the common case simple.
   const password = options.password ?? TEST_PASSWORD;
+  // XLIST and SPECIAL-USE are mutually exclusive on purpose: imapflow prefers
+  // XLIST only when SPECIAL-USE is absent, which is exactly the Yandex/Mail.ru
+  // situation this harness reproduces.
+  const basePlugins = options.plugins ?? ['STARTTLS', 'MOVE', 'UIDPLUS'];
+  const plugins = options.xlist ? [...basePlugins.filter((plugin) => plugin !== 'SPECIAL-USE'), xlistPlugin] : basePlugins;
   const server = imapkit({
     tls: { port: 0, host: '127.0.0.1' },
     credentials: { key, cert },
@@ -79,7 +165,7 @@ export async function startMockServer(options = {}) {
     // without it proves the client does not depend on that extension. MOVE is
     // loaded by default because organising mail needs it; a test that needs the
     // "no MOVE" behaviour passes an explicit plugin list.
-    plugins: options.plugins ?? ['STARTTLS', 'MOVE', 'UIDPLUS'],
+    plugins,
     maxLiteralSize: 64 * 1024 * 1024,
   });
 

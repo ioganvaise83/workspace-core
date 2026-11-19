@@ -25,12 +25,28 @@
 #   11. MCP registration in DSH
 #
 # STATUS VOCABULARY (per account, and for the integration as a whole)
-#   NOT_CONFIGURED        no accounts file, or the account is absent
-#   CONNECTION_FAILED     the server could not be reached
-#   AUTH_FAILED           credentials refused
-#   MCP_UNAVAILABLE       the MCP process or endpoint does not answer
+#   NOT_CONFIGURED         no accounts file, or the account is absent
+#   CONFIG_INVALID         the server refused to load the account (empty or missing
+#                          secret file, malformed entry). It is not in the pool, so
+#                          nothing was probed and nothing was touched
+#   CONNECTION_FAILED      the server could not be reached (DNS, TCP or a timeout)
+#   AUTH_FAILED            credentials refused
+#   INBOX_FAILED           the session works but the mailbox could not be opened
+#   COMMAND_POLICY_BLOCKED the local guard refused a command the server accepts;
+#                          this is a defect in THIS integration, not in the provider
+#   FAILED_UNKNOWN         an error the script could not classify; deliberately not
+#                          labelled CONNECTION_FAILED, because that would invent a
+#                          diagnosis
+#   MCP_UNAVAILABLE        the MCP process or endpoint does not answer
 #   READ_ONLY_CHECK_FAILED a write appeared, or a flag changed
-#   HEALTHY               all of the above passed
+#   HEALTHY                all of the above passed
+#
+# A NOTE ON "READY"
+#   The server's own `connection_status: READY` means a TLS session was established
+#   and the credentials were accepted. It is NOT proof that INBOX is readable. This
+#   script therefore never treats READY as a result on its own: it records the
+#   folder listing, the search, the read and the server-side `inbox_status`
+#   (VERIFIED / FAILED / NOT_CHECKED) separately, and only a real read counts.
 #
 # WHAT IT NEVER DOES
 #   * It never prints a password, a token or a message body. It prints ids,
@@ -206,20 +222,53 @@ fi
 # Pull account records out of the JSON. The response is `structuredContent` in
 # the MCP envelope; a compact scan for `"account_id"` entries is enough here and
 # avoids depending on a JSON parser in the harness.
-account_ids=$(printf '%s' "${accounts_json}" | grep -o '"account_id":"[a-z0-9-]*"' | sed 's/"account_id":"//;s/"//' | sort -u)
+#
+# The two lists are SPLIT, because they mean opposite things:
+#   accounts          loaded and usable, worth probing
+#   invalid_accounts  REJECTED at load time (empty or missing secret, malformed
+#                     entry). The server does not hold these ids at all, so
+#                     probing one returns UNKNOWN_ACCOUNT and buries the real
+#                     reason behind "unclassified error". That masking hid an
+#                     empty password file once already, so it is fixed here.
+valid_section=$(printf '%s' "${accounts_json}" | sed 's/"invalid_accounts".*//')
+invalid_section=$(printf '%s' "${accounts_json}" | sed 's/.*"invalid_accounts"//')
 
-if [ -z "${account_ids}" ]; then
-  status="NOT_CONFIGURED"
-  if [ "${tools_ok}" = "1" ]; then
+account_ids=$(printf '%s' "${valid_section}" | grep -o '"account_id":"[a-z0-9-]*"' | sed 's/"account_id":"//;s/"//' | sort -u)
+invalid_ids=$(printf '%s' "${invalid_section}" | grep -o '"account_id":"[a-z0-9-]*"' | sed 's/"account_id":"//;s/"//' | sort -u)
+
+count_accounts=$(printf '%s\n' "${account_ids}" | grep -c . || true)
+count_invalid=$(printf '%s\n' "${invalid_ids}" | grep -c . || true)
+
+if [ "${tools_ok}" = "1" ]; then
+  if [ "${count_accounts}" -eq 0 ] && [ "${count_invalid}" -eq 0 ]; then
+    status="NOT_CONFIGURED"
     line "Accounts" "none configured (valid state)"
     pass "Configuration" "0 accounts; the integration is idle, not broken"
+  elif [ "${count_invalid}" -gt 0 ]; then
+    line "Accounts" "${count_accounts} loaded, ${count_invalid} REJECTED at load time"
   else
-    skip "Configuration" "unknown (MCP unavailable)"
+    line "Accounts" "${count_accounts} configured"
   fi
 else
-  count_accounts=$(printf '%s\n' "${account_ids}" | grep -c .)
-  line "Accounts" "${count_accounts} configured"
+  skip "Configuration" "unknown (MCP unavailable)"
 fi
+
+# --- accounts the server refused to load -----------------------------------
+# Reported from the server's own reason and never probed: a DISABLED account is
+# not in the pool, so a tool call for it can only answer UNKNOWN_ACCOUNT.
+for account_id in ${invalid_ids}; do
+  if [ -n "${ONLY_ACCOUNT}" ] && [ "${account_id}" != "${ONLY_ACCOUNT}" ]; then
+    continue
+  fi
+  [ "${JSON}" = "1" ] || printf '\n   ── %s ──\n' "${account_id}"
+  reason=$(printf '%s' "${invalid_section}" | grep -o "\"account_id\":\"${account_id}\"[^}]*\"last_error\":\"[^\"]*\"" | sed -n 's/.*"last_error":"\([^"]*\)".*/\1/p' | head -1)
+  line "Configuration" "REJECTED at load time"
+  line "Reason" "${reason:-not reported by the server}"
+  line "Status" "DISABLED — absent from the pool, so no mailbox was touched"
+  line "Fix" "repair the configuration file named in the reason, then restart the service"
+  fail "${account_id}" "CONFIG_INVALID"
+  JSON_ACCOUNTS="${JSON_ACCOUNTS}${JSON_ACCOUNTS:+,}{\"account_id\":\"${account_id}\",\"status\":\"CONFIG_INVALID\",\"checks_passed\":0,\"checks_failed\":1}"
+done
 
 for account_id in ${account_ids}; do
   if [ -n "${ONLY_ACCOUNT}" ] && [ "${account_id}" != "${ONLY_ACCOUNT}" ]; then
@@ -242,12 +291,13 @@ for account_id in ${account_ids}; do
   case "${folders_json}" in
     *'"isError":true'*)
       code=$(json_field "${folders_json}" code)
+      layer=$(json_field "${folders_json}" layer)
       case "${code}" in
         AUTH_FAILED)
           account_status="AUTH_FAILED"
           account_bad=$((account_bad+1))
           line "TLS connection" "ok (a TLS handshake is required to reach LOGIN)"
-          line "Authorisation" "FAILED — the provider refused the app password"
+          line "Authorisation" "FAILED — the provider refused the password or app password"
           line "INBOX" "not checked (no session)"
           ;;
         TLS_FAILED)
@@ -257,19 +307,40 @@ for account_id in ${account_ids}; do
           line "Authorisation" "not attempted"
           line "INBOX" "not checked"
           ;;
+        READ_ONLY_VIOLATION)
+          # This is OUR guard refusing a command, not the provider failing. It was
+          # previously reported as CONNECTION_FAILED, which sent the owner to the
+          # provider for a fault in this process. Never do that again.
+          account_status="COMMAND_POLICY_BLOCKED"
+          account_bad=$((account_bad+1))
+          line "TLS connection" "ok (the session reached the command that was refused)"
+          line "Authorisation" "ok (the refusal happened after login)"
+          line "INBOX" "BLOCKED by the local IMAP command guard (${layer:-command_policy})"
+          line "Diagnosis" "server is fine; the integration refused a command it should allow"
+          ;;
         CONNECTION_FAILED|CONNECTION_TIMEOUT|TIMEOUT)
           account_status="CONNECTION_FAILED"
           account_bad=$((account_bad+1))
-          line "TLS connection" "FAILED — server unreachable"
+          # The layer distinguishes DNS from TCP from a timeout, which the old
+          # single "unreachable" label could not.
+          case "${layer}" in
+            dns) line "DNS" "FAILED — host name did not resolve"; line "TLS connection" "not attempted" ;;
+            tcp) line "TCP" "FAILED — connection refused or reset"; line "TLS connection" "not attempted" ;;
+            timeout) line "Timing" "FAILED — the server did not answer in time"; line "TLS connection" "unknown" ;;
+            *) line "TLS connection" "FAILED — server unreachable"; ;;
+          esac
           line "Authorisation" "not attempted"
           line "INBOX" "not checked"
           ;;
         *)
-          account_status="CONNECTION_FAILED"
+          # An unrecognised failure is NOT a connection failure. Saying so avoids
+          # inventing a diagnosis the evidence does not support.
+          account_status="FAILED_UNKNOWN"
           account_bad=$((account_bad+1))
           line "TLS connection" "unknown"
           line "Authorisation" "unknown"
           line "INBOX" "unknown"
+          line "Diagnosis" "unclassified error ${code:-<none>} (layer ${layer:-<none>})"
           ;;
       esac
       ;;
@@ -279,14 +350,44 @@ for account_id in ${account_ids}; do
       account_ok=$((account_ok+1))
       line "TLS connection" "ok (handshake completed over TLS)"
       account_ok=$((account_ok+1))
-      line "Authorisation" "ok (app password accepted)"
+      line "Authorisation" "ok (credentials accepted)"
       if [ "${inbox_present}" -ge 1 ]; then
         account_ok=$((account_ok+1))
-        line "INBOX" "available (${folder_count} folder(s) listed)"
+        # Deliberately "listed", not "available": a name in a LIST response is not
+        # proof that the mailbox can be opened. The search and read below are what
+        # actually prove readability, and mail_get_account_status reports it
+        # explicitly as inbox_status.
+        line "INBOX listed" "yes (${folder_count} folder(s) returned by the server)"
       else
         account_bad=$((account_bad+1))
-        line "INBOX" "MISSING from the folder list"
+        line "INBOX listed" "MISSING from the folder list"
       fi
+
+      # 6b. Ask the server-side status tool, which opens the mailbox and reports
+      # inbox_status. This is the field that distinguishes "the session came up"
+      # from "INBOX is readable"; connection_status alone must not be read as the
+      # latter.
+      status_json=$(mcp_call "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\",\"params\":{\"name\":\"mail_get_account_status\",\"arguments\":{\"account_id\":\"${account_id}\"}}}")
+      inbox_status=$(json_field "${status_json}" inbox_status)
+      case "${inbox_status}" in
+        VERIFIED)
+          account_ok=$((account_ok+1))
+          line "INBOX opened" "verified (mailbox opened read-only)"
+          ;;
+        FAILED)
+          account_status="INBOX_FAILED"
+          account_bad=$((account_bad+1))
+          line "INBOX opened" "FAILED — the session works but the mailbox could not be opened"
+          ;;
+        NOT_CHECKED|"")
+          # Not a failure: it means the status tool could not open a mailbox, which
+          # the earlier checks already report. Never upgrade this to success.
+          line "INBOX opened" "not verified by the status tool"
+          ;;
+        *)
+          line "INBOX opened" "unexpected state: ${inbox_status}"
+          ;;
+      esac
 
       # 8. search — the cheapest real read of message metadata.
       search_json=$(mcp_call "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"mail_search\",\"arguments\":{\"account_id\":\"${account_id}\",\"limit\":1}}}")
@@ -413,11 +514,20 @@ else
   fi
   printf '\n Status meanings:\n'
   printf '   NOT_CONFIGURED         no accounts configured (a valid state)\n'
-  printf '   CONNECTION_FAILED      IMAP server unreachable, or TLS not trusted\n'
-  printf '   AUTH_FAILED            provider refused the app password\n'
+  printf '   CONFIG_INVALID         the server refused to load the account; the reason\n'
+  printf '                          is printed above (usually an empty secret file)\n'
+  printf '   CONNECTION_FAILED      DNS, TCP or timeout: the server could not be reached\n'
+  printf '   AUTH_FAILED            the provider refused the password or app password\n'
+  printf '   INBOX_FAILED           session works, but the mailbox could not be opened\n'
+  printf '   COMMAND_POLICY_BLOCKED local guard refused a command the server accepts\n'
+  printf '                          (a defect in this integration, not the provider)\n'
+  printf '   FAILED_UNKNOWN         unclassifiable error, reported as such on purpose\n'
   printf '   MCP_UNAVAILABLE        the MCP process or endpoint does not answer\n'
   printf '   READ_ONLY_CHECK_FAILED a message flag changed during a read\n'
-  printf '   HEALTHY                TLS, auth, INBOX, search and read all passed\n'
+  printf '   HEALTHY                TLS, auth, INBOX open, search and read all passed\n'
+  printf ' Note: the server states connection_status READY once TLS and credentials\n'
+  printf ' succeed. That is NOT proof of INBOX access; inbox_status (VERIFIED, FAILED,\n'
+  printf ' NOT_CHECKED) and a real read are what prove it.\n'
   printf ' This script never shows passwords, tokens or message bodies.\n'
   printf ' Use --show-subjects to print the newest subject per account.\n\n'
 fi

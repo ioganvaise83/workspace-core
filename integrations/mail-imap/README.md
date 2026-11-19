@@ -80,6 +80,35 @@ Refused unconditionally, in both modes: `EXPUNGE`, `UID EXPUNGE`, `CLOSE`,
 `STORE` with `\Deleted`, `\Answered`, `\Draft`, `\Recent`; `STORE` that clears all
 flags; `STORE` with an unknown flag.
 
+**`XLIST` is a permitted read.** It belongs with `LIST` and `LSUB`, not with the
+writes: it takes a reference and a pattern and answers with untagged
+`* XLIST (flags) delimiter name` lines, so it cannot create, modify or delete
+anything and cannot set a flag on any message. It has to be allowed because the
+pinned `imapflow` 2.12.1 picks the listing verb from the server's own
+advertisement:
+
+```js
+const listCommand = connection.capabilities.has('XLIST') &&
+    !hasCapability(connection, 'SPECIAL-USE') ? 'XLIST' : 'LIST';
+```
+
+Yandex and Mail.ru advertise `XLIST` and not RFC 6154 `SPECIAL-USE`, so every
+`client.list()` against them sent `XLIST`; refusing it turned a folder listing
+into `READ_ONLY_VIOLATION` and made working accounts look unreachable. Gmail
+advertises `SPECIAL-USE`, keeps sending `LIST`, and is untouched — which is why
+the defect looked provider-specific. Regression coverage is in
+`test/xlist.test.js`: it asserts the library's choice against a server that
+behaves like those providers, the guard's own `exec`/`runInternal` interception
+layer, and that no write verb or flag change follows from the permission.
+
+**Status reporting distinguishes transport from mailbox access.**
+`connection_status: READY` means only that TLS came up and the credentials were
+accepted; it is not proof that INBOX can be opened. `inbox_status` carries that
+separately: `VERIFIED` (an EXAMINE succeeded), `FAILED` (the mailbox was refused,
+reason recorded), `NOT_CHECKED` (no mailbox opened yet). Errors also carry a
+`failure_layer` — `dns`, `tcp`, `tls`, `auth`, `timeout`, `command_policy` or
+`protocol` — so a bug in our own guard is never mistaken for a dead provider.
+
 **3. MOVE, or nothing.** If a server does not advertise `MOVE`, `imapflow`
 silently emulates it as **COPY + `\Deleted` + EXPUNGE**. That is exactly the
 destructive path the brief forbids, and it happens *inside the library*. So the

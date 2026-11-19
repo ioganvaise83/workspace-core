@@ -38,11 +38,34 @@ export class ReadOnlyViolation extends Error {
   }
 }
 
-/** Commands permitted in both modes. */
+/**
+ * Commands permitted in both modes.
+ *
+ * XLIST (the legacy Gmail extension, also spoken by Yandex and Mail.ru) is a
+ * LISTING command: it takes a reference and a pattern and answers with untagged
+ * `* XLIST (flags) delimiter name` lines. It creates, modifies and deletes
+ * nothing, sets no flag on any message, and has no mailbox-selecting side
+ * effect, so it belongs with LIST and LSUB rather than with the writes.
+ *
+ * It is here because the pinned imapflow 2.12.1 chooses the listing verb from
+ * the server's OWN advertisement:
+ *
+ *     let listCommand = connection.capabilities.has('XLIST') &&
+ *         !hasCapability(connection, 'SPECIAL-USE') ? 'XLIST' : 'LIST';
+ *
+ * A server that advertises XLIST but not RFC 6154 SPECIAL-USE (Yandex and
+ * Mail.ru both do) therefore makes `client.list()` emit XLIST, and refusing it
+ * broke folder listing and INBOX access on those accounts while Gmail, which
+ * advertises SPECIAL-USE, kept working. Permitting the verb is the fix; it does
+ * not widen the write surface by one command, because XLIST cannot write.
+ *
+ * The note about the library version is deliberate: if a future imapflow stops
+ * choosing XLIST, this entry becomes dead weight but never a hole.
+ */
 export const READ_COMMANDS = Object.freeze(
   new Set([
     'CAPABILITY', 'NOOP', 'LOGOUT', 'STARTTLS', 'AUTHENTICATE', 'LOGIN', 'ID',
-    'ENABLE', 'NAMESPACE', 'EXAMINE', 'LIST', 'LSUB', 'STATUS', 'SEARCH',
+    'ENABLE', 'NAMESPACE', 'EXAMINE', 'LIST', 'LSUB', 'XLIST', 'STATUS', 'SEARCH',
     'FETCH', 'COMPRESS', 'UNSELECT',
   ]),
 );
