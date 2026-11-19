@@ -1,0 +1,13 @@
+# Excluded from the build context: secrets, tests and local state never belong in
+# an image layer. `npm ci` needs package.json, the lock file and .npmrc only.
+.git
+.gitignore
+node_modules
+test
+runtime
+*.log
+.env
+.env.*
+*.secret
+accounts.json
+README.md

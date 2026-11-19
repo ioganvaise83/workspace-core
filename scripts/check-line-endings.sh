@@ -44,6 +44,7 @@ is_checked() {
     *.sh) return 0 ;;
     *.py) return 0 ;;
     *.cjs) return 0 ;;
+    *.mjs) return 0 ;;
     */Dockerfile) return 0 ;;
     *.dockerfile) return 0 ;;
     *) return 1 ;;

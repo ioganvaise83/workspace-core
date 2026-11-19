@@ -9,6 +9,14 @@
       "url": "http://gmail-mcp:8765/mcp",
       "tokenFile": "gmail-bridge.token",
       "description": "Read-only Gmail: search, read threads, list labels, download one attachment. Never sends mail."
+    },
+    {
+      "id": "mail-imap",
+      "enabled": true,
+      "serverName": "mail-imap",
+      "url": "http://mail-imap-mcp:8765/mcp",
+      "tokenFile": "mail-bridge.token",
+      "description": "Universal read-only+organise IMAP mail for four accounts (Gmail XOAUTH2, two Yandex, Mail.ru). Search, read, list folders/labels, conversations, and previewed/approved organising actions (flags, archive, move, labels, trash). Never sends, drafts, or permanently deletes."
     }
   ]
 }

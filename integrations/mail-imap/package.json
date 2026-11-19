@@ -1,0 +1,25 @@
+{
+  "name": "@workspace-core/mail-imap-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only multi-account IMAP MCP server for the Personal AI Workspace",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "imapflow": "2.12.1",
+    "mailparser": "3.14.5",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "imapkit": "5.3.2"
+  },
+  "license": "MIT"
+}

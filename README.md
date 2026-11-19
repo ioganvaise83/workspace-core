@@ -6,7 +6,8 @@ DeepSeek Harness, and built-in MCP integrations that work out of the box.
 > Status: working platform, evolving. DeepSeek Harness is in developer preview.
 > The harness image is **community-maintained**, not an official DeepSeek image —
 > review it before trusting sensitive content. Gmail is a working read-only
-> integration; GitHub is a planned placeholder.
+> integration, and the IMAP server is implemented and tested offline but not yet
+> connected to a real mailbox; GitHub is a planned placeholder.
 
 ## The three areas
 
@@ -27,11 +28,13 @@ compose.yaml                  one file, all services
 integrations/
   registry.json               which integrations exist
   gmail/                      Dockerfile, allowlist entrypoint, docs
+  mail-imap/                  read-only multi-account IMAP MCP (source, tests, docs)
   github/README.md            planned
 scripts/
   bootstrap-integrations.cjs  registers integrations in the DSH profile
   init-token.sh               mints the shared MCP bridge token
-  integration-status.sh       layered diagnostics
+  integration-status.sh       layered Gmail diagnostics
+  mail-imap-status.sh         per-account IMAP diagnostics
   check-line-endings.sh       fails on CRLF in files Linux executes
   check_setup.py              non-destructive preflight
   knowledge_status.py         read-only Git status of the private repo
@@ -126,16 +129,20 @@ never in Git.
 
 ## Services
 
-`docker compose up -d --build` starts three:
+`docker compose up -d --build` starts these, plus two one-shot token services:
 
 | Service | Role |
 |---|---|
 | `harness` | DeepSeek Harness, loopback port 3080 |
 | `gmail-mcp` | read-only Gmail MCP server, internal network only, no host port |
-| `mcp-token` | one-shot; mints the shared bridge token onto `dsh-home` |
+| `mail-imap-mcp` | universal mail MCP: four IMAP accounts, read + approved organising actions |
+| `mcp-token` | one-shot; mints the Gmail bridge token onto `dsh-home` |
+| `mail-token` | one-shot; mints the IMAP bridge token onto `dsh-home` |
 
-Integrations start before the harness, which is why the token is minted by a
-separate one-shot service rather than by the harness itself.
+Integrations start before the harness, which is why each token is minted by a
+separate one-shot service rather than by the harness itself. The two integrations
+have separate tokens and separate one-shot services, so a token compromised in one
+does not open the other.
 
 ## Built-in integrations
 
@@ -163,6 +170,44 @@ Labels act as folders, but under `gmail.readonly` the agent cannot apply them:
 labelling requires `gmail.modify`, which also permits sending. Sorting mail stays
 manual by design.
 
+### Universal mail (IMAP)
+
+One server for four mailboxes — Gmail over IMAP **XOAUTH2**, two Yandex, one
+Mail.ru — through a single IMAP engine and one tool set, registered as
+`mcp__mail-imap__*`. Adding a fifth account is configuration only.
+
+Fourteen tools cover reading and **organising**: search, read, folders, labels,
+header-based conversations, plus `mail_preview_actions` / `mail_apply_actions` /
+`mail_get_operation_status` / `mail_undo_operation`.
+
+**What it will not do:** send, reply, forward, create drafts, or delete
+permanently. `EXPUNGE`, `CLOSE` and `APPEND` are refused by a command guard that
+inspects the actual IMAP traffic, so this is a property of the server, not an
+instruction to the model. It also refuses `\Deleted`, because your own mail
+client would later expunge it.
+
+**Writes are gated, not trusted.** A plan is validated against live server state
+and reduced to a SHA-256 digest over the exact accounts, UIDs, folder and action.
+Applying it requires that digest, which is re-computed and compared — a swapped
+UID or folder fails. Plans that are large, cross-account or touch trash
+additionally need an approval only the owner can produce, on the host:
+
+```bash
+sh scripts/mail-approve.sh <digest>
+```
+
+The approval file lives in `runtime/mail-imap/state/approvals/`, which is not
+mounted into the harness. The agent can ask for approval; it cannot grant it.
+
+Reading still never marks mail as read (`BODY.PEEK`), and writes are opt-in per
+account (`allowWrites`). Gmail IMAP needs the broad `https://mail.google.com/`
+scope — the existing `gmail.readonly` token cannot be reused — so it uses its own
+client and token files, separate from the Gmail API integration.
+
+See [`integrations/mail-imap/README.md`](integrations/mail-imap/README.md) for
+provider setup. An unconfigured installation remains a supported state: the
+server starts with zero accounts and the platform works.
+
 ## Applications
 
 Applications live in `workspace-apps`, mounted at `/workspace/apps`, and are
@@ -184,11 +229,15 @@ The mandatory policy for building one is
 
 ```bash
 docker compose exec harness /workspace/core/scripts/integration-status.sh
+docker compose exec harness /workspace/core/scripts/mail-imap-status.sh
 ```
 
-It reports four independent layers — bridge reachability, tool registration,
-Gmail API authorization, DSH registration — and exits non-zero if any fails.
-`/healthz` alone proves only that the gateway is up, not that Gmail works.
+The first reports four independent layers for Gmail — bridge reachability, tool
+registration, Gmail API authorization, DSH registration. The second reports the
+same shape for every IMAP account separately, because one bad password must not
+hide a working mailbox. Both exit non-zero if any layer fails.
+
+`/healthz` alone proves only that a gateway is up, never that any mailbox works.
 
 ## Line endings (Windows)
 

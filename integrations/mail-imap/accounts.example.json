@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "defaults": {
+    "defaultFolder": "INBOX",
+    "maxResults": 25,
+    "batchThreshold": 5,
+    "connectionTimeoutMs": 20000,
+    "socketTimeoutMs": 60000
+  },
+  "accounts": [
+    {
+      "id": "gmail-personal",
+      "provider": "gmail",
+      "displayName": "Gmail — personal",
+      "user": "first.account@gmail.com",
+      "authType": "xoauth2",
+      "oauth": {
+        "clientFile": "/config/oauth/gmail-imap-client.json",
+        "tokenFile": "/state/oauth/gmail-imap-token.json"
+      },
+      "allowWrites": true,
+      "defaultFolder": "INBOX"
+    },
+    {
+      "id": "yandex-1",
+      "provider": "yandex",
+      "displayName": "Yandex — first",
+      "user": "second.account@yandex.ru",
+      "passwordFile": "/run/secrets/mail-imap/yandex-1.password",
+      "allowWrites": true,
+      "defaultFolder": "INBOX"
+    },
+    {
+      "id": "yandex-2",
+      "provider": "yandex",
+      "displayName": "Yandex — second",
+      "user": "third.account@yandex.ru",
+      "passwordFile": "/run/secrets/mail-imap/yandex-2.password",
+      "allowWrites": true,
+      "defaultFolder": "INBOX"
+    },
+    {
+      "id": "mailru-1",
+      "provider": "mailru",
+      "displayName": "Mail.ru — first",
+      "user": "fourth.account@mail.ru",
+      "passwordFile": "/run/secrets/mail-imap/mailru-1.password",
+      "allowWrites": true,
+      "defaultFolder": "INBOX"
+    }
+  ]
+}

@@ -92,6 +92,15 @@ services:
         condition: service_completed_successfully
       gmail-mcp:
         condition: service_started
+      # Ordering only, exactly like gmail-mcp above: no health condition, so an
+      # unconfigured or broken mail-imap-mcp never blocks the harness. The
+      # dependency exists because the harness discovers MCP tools once at start;
+      # a server that appears later is only picked up by the reconnect loop,
+      # which may already be exhausted.
+      mail-token:
+        condition: service_completed_successfully
+      mail-imap-mcp:
+        condition: service_started
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -152,6 +161,112 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Built-in integration. Read-only IMAP across several mailboxes.
+  #
+  # Same two independent barriers as gmail-mcp, expressed for IMAP:
+  #
+  #   1. The tool surface has no write verb at all (see integrations/mail-imap/
+  #      src/tools.js). A model cannot call what was never registered.
+  #   2. Every IMAP command passes a session guard (src/readonly.js) that refuses
+  #      SELECT, STORE, APPEND, COPY, MOVE, EXPUNGE, CLOSE, CREATE, DELETE,
+  #      RENAME, SUBSCRIBE and any non-PEEK body fetch. Mailboxes are opened with
+  #      EXAMINE, and bodies are fetched with BODY.PEEK, so a read does not even
+  #      set \Seen.
+  #
+  # Credentials: accounts.json plus one password file per account, bind-mounted
+  # read-only from the host. No credential is in this file, in the image, or in
+  # any tool result.
+  mail-imap-mcp:
+    build:
+      context: ./integrations/mail-imap
+      dockerfile: Dockerfile
+      # `npm ci` runs behind the corporate TLS-inspecting proxy at build time, so
+      # the CA is needed while the layer is built and nowhere afterwards.
+      # Requires BuildKit (the default in Docker Desktop and Compose v2).
+      secrets:
+        - custom-ca
+    image: ${MAIL_IMAP_MCP_IMAGE:-personal-ai-workspace/mail-imap-mcp:0.1.0}
+    restart: unless-stopped
+    # No host ports: reachable only from other services on the compose network.
+    expose:
+      - "8765"
+    environment:
+      MCP_PORT: "8765"
+      MCP_HOST: "0.0.0.0"
+      # Token file written by the mail-token service onto the dsh-home volume.
+      MAIL_BRIDGE_TOKEN_FILE: /dsh-home/bootstrap/mail-bridge.token
+      # Account list. Optional: without it the server starts and reports zero
+      # accounts, which is a valid state, not a failure.
+      MAIL_IMAP_ACCOUNTS_FILE: /config/accounts.json
+      MAIL_TOOL_TIMEOUT_MS: "60000"
+      # Where previews, owner approvals and the operation journal live. This
+      # directory is NOT mounted into the harness: that is what makes an approval
+      # something the agent cannot produce for itself.
+      MAIL_APPROVAL_DIR: /state/approvals
+      # When a secret is missing, say which account rather than failing silently.
+      NODE_ENV: production
+    volumes:
+      # Bootstrap-generated bridge token, read-only.
+      - dsh-home:/dsh-home:ro
+      # Account list, read-only. Optional: the directory may be empty or absent;
+      # Docker then creates an empty one and the server reports zero accounts.
+      - ${MAIL_IMAP_CONFIG_DIR:-./runtime/mail-imap}:/config:ro
+      # One password file per account, read-only. Both the config directory and
+      # the secrets directory are git-ignored, and neither is in the image.
+      - ${MAIL_IMAP_SECRETS_DIR:-./runtime/mail-imap/secrets}:/run/secrets/mail-imap:ro
+      # Previews, approvals and the operation journal. Read-write, because the
+      # server records them, and deliberately NOT mounted into the harness.
+      - ${MAIL_IMAP_STATE_DIR:-./runtime/mail-imap/state}:/state
+      # Optional corporate CA for outbound IMAPS. Empty by default; the
+      # entrypoint exports it only when the file is non-empty.
+      - ${CUSTOM_CA_PATH:-./integrations/ca/empty-ca.pem}:/home/node/custom-ca.pem:ro
+    depends_on:
+      mail-token:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The server is stateless: 128 MB is generous for a 5 MB-message cap and a
+    # handful of concurrent tool calls, and it bounds a decompression bomb.
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # One-shot helper that mints this integration's own bridge token.
+  #
+  # A separate token from gmail's, for the same reason the repositories are
+  # separate: a token leaked from one integration must not open the other. It is
+  # the same proven script with a different TOKEN_NAME, so there is one
+  # implementation of minting, not two.
+  mail-token:
+    image: ${DSH_IMAGE:-runzhliu/deepseek-harness:0.2.1-rc.3-r1}
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/init-token.sh
+    environment:
+      TOKEN_DIR: /dsh-home/bootstrap
+      TOKEN_NAME: mail-bridge.token
+    volumes:
+      - dsh-home:/dsh-home
+      # The script itself lives in the repository, not in the image.
+      - ./scripts/init-token.sh:/usr/local/bin/init-token.sh:ro
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
 
   # One-shot helper that mints the shared bridge token onto the dsh-home volume.
   # It exists because compose starts integrations before the harness, while the

@@ -1,0 +1,13 @@
+# Dependencies are installed in the image at build time and are never committed.
+node_modules/
+
+# Local secrets and per-installation configuration. The committed templates are
+# accounts.example.json and env.example.txt.
+accounts.json
+*.secret
+*.pem
+*.key
+
+# Local test output
+coverage/
+*.log
