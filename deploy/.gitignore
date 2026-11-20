@@ -1,0 +1,24 @@
+# Deployment-local artefacts that must never be committed.
+#
+# The root .gitignore already ignores `secrets/` at any depth and `.env`; this
+# file exists so the intent is visible where the files live, and so a future
+# contributor cannot widen the root rules without noticing.
+
+# Generated secrets (prepare-secrets.sh writes here).
+secrets/
+
+# Per-host configuration.
+.env
+.env.*
+
+# Filled-in allowlist: contains real subject identifiers of real people.
+allowed-subjects.local
+**/allowed-subjects.local
+
+# TLS material, if someone copies it next to the compose file by mistake.
+tls/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx

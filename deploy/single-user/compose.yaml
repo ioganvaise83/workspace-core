@@ -1,0 +1,186 @@
+# Secure single-user deployment: nginx + oauth2-proxy + gateway + the existing Harness.
+#
+# This is an OVERLAY project, not a replacement. It never builds a second Harness
+# and never touches the existing `../compose.yaml` services beyond attaching to
+# the network the Harness already uses. Rollback is `docker compose down` here
+# plus starting the original project (see docs/security/deployment-guide.md).
+#
+# What is published: nginx only, on one concrete address, 443.
+# What is never published: Harness, gateway, oauth2-proxy, MCP bridges.
+#
+# Prerequisites (the owner performs these; they are activation, not setup):
+#   1. TLS certificate and key on the host, outside Git.
+#   2. DNS name resolving to the VM.
+#   3. Keycloak realm, client and user created.
+#   4. The existing Harness reachable on a shared network.
+#
+# Usage:
+#   cp env.example .env && edit .env
+#   ./scripts/prepare-secrets.sh          # generates secrets on the host
+#   docker compose config                 # validate, starts nothing
+#   docker compose up -d                  # ACTIVATION: publishes 443
+
+name: personal-ai-secure
+
+services:
+  # -------------------------------------------------------------------------
+  # nginx: the only published surface. TLS terminates here.
+  # -------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.30.7-alpine@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97c3
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/usr/local/bin/nginx-entrypoint.sh"]
+    # The bind above pins the listening address to one concrete interface. With
+    # `127.0.0.1` nothing is reachable from the network; activation changes it to
+    # the VM's address after the owner approves.
+    ports:
+      - "${NGINX_BIND_ADDRESS:?set NGINX_BIND_ADDRESS in .env}:${NGINX_HTTPS_PORT:-443}:8443"
+    environment:
+      OAUTH2_PROXY_UPSTREAM: ${OAUTH2_PROXY_UPSTREAM:-oauth2-proxy:4180}
+      DSH_GATEWAY_UPSTREAM: ${DSH_GATEWAY_UPSTREAM:-gateway:8080}
+      DSH_HOSTNAME: ${DSH_HOSTNAME:?set DSH_HOSTNAME in .env}
+      NGINX_HTTP_PORT: "8080"
+      NGINX_HTTPS_PORT: "8443"
+      NGINX_CLIENT_MAX_BODY: ${NGINX_CLIENT_MAX_BODY:-300m}
+      # Rendered into the config; empty line means "no HSTS yet". The owner sets
+      # this to the real directive only after confirming HTTPS and the hostname.
+      DSH_HSTS_DIRECTIVE: ${DSH_HSTS_DIRECTIVE:-}
+      GATEWAY_PROXY_SHARED_SECRET_FILE: /run/secrets/gateway-proxy-shared-secret
+    volumes:
+      - ./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+      - ./nginx/entrypoint.sh:/usr/local/bin/nginx-entrypoint.sh:ro
+      # Header hygiene, included by every proxying location. Mounted read-only
+      # where the template expects it; the entrypoint validates that it exists.
+      - ./nginx/proxy-hygiene.conf:/etc/nginx/dsh/proxy-hygiene.conf:ro
+      # TLS material lives outside Git on the host, read-only.
+      - ${TLS_DIR:?set TLS_DIR in .env}:/etc/nginx/tls:ro
+    secrets:
+      - gateway-proxy-shared-secret
+    depends_on:
+      oauth2-proxy:
+        condition: service_started
+      gateway:
+        condition: service_started
+    networks:
+      - edge
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=32m
+      - /var/run:size=8m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # nginx must bind 8443 inside the container and chown its temp files. These
+      # are the only capabilities it needs; the entrypoint drops to a non-root
+      # worker for request handling.
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -------------------------------------------------------------------------
+  # oauth2-proxy: OIDC Authorization Code + PKCE, allowlist enforcement.
+  # -------------------------------------------------------------------------
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.6@sha256:c3415e8660af553f5e18f5d90db050614c02493c0ac6260ac59442f6d9b12048
+    restart: unless-stopped
+    command:
+      - --config=/etc/oauth2-proxy/oauth2-proxy.cfg
+    # No secret environment variables: both secrets are named as files inside the
+    # config (`client_secret_file`, `cookie_secret_file`), which this release
+    # supports and env variables do not cover.
+    volumes:
+      - ./oauth2-proxy/oauth2-proxy.cfg:/etc/oauth2-proxy/oauth2-proxy.cfg:ro
+      # The allowlist is generated per deployment; the tracked copy is a template
+      # with no active entries.
+      - ${ALLOWED_SUBJECTS_FILE:-./oauth2-proxy/allowed-subjects.txt}:/etc/oauth2-proxy/allowed-subjects.txt:ro
+    secrets:
+      - oidc-client-secret
+      - oauth2-cookie-secret
+    networks:
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -------------------------------------------------------------------------
+  # gateway: verifies the nginx-attested identity and mints the DSH cookie.
+  # This is the only component that holds the DSH signing secret (ADR-7).
+  # -------------------------------------------------------------------------
+  gateway:
+    image: node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
+    restart: unless-stopped
+    command: ["node", "/app/server.js"]
+    environment:
+      DSH_UPSTREAM: ${DSH_UPSTREAM:-http://harness:3080}
+      GATEWAY_LISTEN_HOST: "0.0.0.0"
+      GATEWAY_LISTEN_PORT: "8080"
+      GATEWAY_ALLOWED_AUTHORITIES: ${GATEWAY_ALLOWED_AUTHORITIES:?set GATEWAY_ALLOWED_AUTHORITIES in .env}
+      GATEWAY_ALLOWED_SUBJECTS: ${GATEWAY_ALLOWED_SUBJECTS:?set GATEWAY_ALLOWED_SUBJECTS in .env}
+      GATEWAY_COOKIE_SECRET_FILE: /run/secrets/dsh-cookie-secret
+      GATEWAY_PROXY_SHARED_SECRET_FILE: /run/secrets/gateway-proxy-shared-secret
+      GATEWAY_COOKIE_MAX_AGE_SECONDS: ${GATEWAY_COOKIE_MAX_AGE_SECONDS:-86400}
+      GATEWAY_ISSUER: ${OIDC_ISSUER_URL:-}
+    volumes:
+      - ./gateway/server.js:/app/server.js:ro
+    secrets:
+      - dsh-cookie-secret
+      - gateway-proxy-shared-secret
+    networks:
+      - edge
+      # The gateway is the only service on both networks: it terminates the edge
+      # leg and reaches the Harness on the application network.
+      - app
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # Browser-facing leg: nginx, oauth2-proxy, gateway. Nothing else.
+  edge:
+    name: ${EDGE_NETWORK:-personal-ai-edge}
+    driver: bridge
+  # Application leg: gateway + the existing Harness. Declared external because
+  # the Harness compose project owns its network; this overlay only joins it.
+  app:
+    name: ${APP_NETWORK:-personal-ai-workspace_default}
+    external: true
+
+secrets:
+  # All four are files on the host, outside Git, `chmod 600`. Compose mounts them
+  # as tmpfs at /run/secrets and they never enter an image layer.
+  oidc-client-secret:
+    file: ${SECRETS_DIR:?set SECRETS_DIR in .env}/oidc-client-secret
+  oauth2-cookie-secret:
+    file: ${SECRETS_DIR:?set SECRETS_DIR in .env}/oauth2-cookie-secret
+  dsh-cookie-secret:
+    file: ${SECRETS_DIR:?set SECRETS_DIR in .env}/dsh-cookie-secret
+  gateway-proxy-shared-secret:
+    file: ${SECRETS_DIR:?set SECRETS_DIR in .env}/gateway-proxy-shared-secret

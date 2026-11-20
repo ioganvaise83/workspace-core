@@ -1,0 +1,157 @@
+{
+  "realm": "personal-ai",
+  "enabled": true,
+  "displayName": "Personal AI Workspace",
+  "displayNameHtml": "<strong>Personal AI Workspace</strong>",
+
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "failureFactor": 5,
+
+  "accessTokenLifespan": 300,
+  "accessTokenLifespanForImplicitFlow": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "offlineSessionIdleTimeout": 2592000,
+  "refreshTokenMaxReuse": 0,
+  "revokeRefreshToken": true,
+
+  "defaultSignatureAlgorithm": "RS256",
+  "passwordPolicy": "length(14) and digits(1) and lowerCase(1) and upperCase(1) and specialChars(1) and notUsername(1)",
+
+  "clients": [
+    {
+      "clientId": "dsh-single-user",
+      "name": "DSH single-user gateway (oauth2-proxy)",
+      "description": "Confidential OIDC client used by oauth2-proxy in front of one Harness instance.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${OIDC_CLIENT_SECRET}",
+
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+
+      "redirectUris": ["${OIDC_REDIRECT_URI}"],
+      "webOrigins": [],
+      "rootUrl": "",
+      "baseUrl": "/",
+
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${OIDC_POST_LOGOUT_REDIRECT_URI}",
+        "backchannel.logout.session.required": "false",
+        "frontchannel.logout.session.required": "false"
+      },
+
+      "fullScopeAllowed": false,
+
+      "protocolMappers": [
+        {
+          "name": "aud-dsh-single-user",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "dsh-single-user",
+            "included.custom.audience": "",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ],
+
+      "defaultClientScopes": ["basic", "profile", "email", "roles", "groups"],
+      "optionalClientScopes": []
+    }
+  ],
+
+  "clientScopes": [
+    {
+      "name": "groups",
+      "description": "Group membership claim used by the gateway allowlist.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "groups": [
+    { "name": "dsh-users", "path": "/dsh-users" }
+  ],
+
+  "roles": {
+    "realm": [
+      {
+        "name": "dsh-access",
+        "description": "May open the Harness gateway. Membership alone is not enough: the gateway also checks the stable subject allowlist.",
+        "composite": false,
+        "clientRole": false
+      }
+    ]
+  },
+
+  "browserSecurityHeaders": {
+    "contentSecurityPolicy": "frame-src 'self'; frame-ancestors 'self'; object-src 'none';",
+    "xContentTypeOptions": "nosniff",
+    "xFrameOptions": "SAMEORIGIN",
+    "xRobotsTag": "none",
+    "strictTransportSecurity": "max-age=31536000; includeSubDomains",
+    "referrerPolicy": "no-referrer"
+  },
+
+  "smtpServer": {},
+  "eventsEnabled": true,
+  "eventsExpiration": 604800,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true
+}

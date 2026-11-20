@@ -1,0 +1,258 @@
+# Complete nginx configuration for one DeepSeek Harness instance behind Keycloak.
+#
+# This is a WHOLE nginx.conf, not a site fragment, because several directives
+# (upstream, map, log_format, limit_req_zone) are only legal in the `http`
+# context. Shipping a fragment invites someone to paste it into a file where it
+# cannot work.
+#
+# Position: browser -> THIS -> (auth_request) oauth2-proxy -> (proxy_pass) gateway -> DSH
+#
+# Design rules encoded below, each tied to a threat in docs/security/threat-model.md:
+#   * deny by default — every location either requires auth_request or is a
+#     public login/asset path needed to render the redirect (T1, T5);
+#   * header hygiene — identity headers are cleared here and set only from the
+#     auth_request result (T4);
+#   * the DSH launch token never appears in any URL, so no log can capture it (T9);
+#   * TLS 1.2+, HSTS only after the certificate and domain are confirmed;
+#   * WebSocket and long-lived streams get explicit timeouts (T6).
+#
+# ${...} placeholders are substituted at container start by entrypoint.sh using
+# envsubst with an explicit variable list. Secrets are NOT substituted here: the
+# shared header value is read from a file into a variable by nginx itself, so the
+# secret never appears in a rendered file or in `nginx -T` output.
+
+worker_processes auto;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+    multi_accept on;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 75s;
+    types_hash_max_size 2048;
+
+    # Never advertise the version, on any response.
+    server_tokens off;
+
+    # ---------------------------------------------------------------------
+    # Logging. `$uri` is the path only: no query string, so a `?token=` or an
+    # authorization `?code=` can never reach the access log (threat T9).
+    # Deliberately absent: $request_uri, $args, $http_cookie, $http_authorization.
+    # ---------------------------------------------------------------------
+    log_format dsh_safe '$remote_addr - $remote_user [$time_local] '
+                        '"$request_method $uri $server_protocol" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent" '
+                        'rt=$request_time uct=$upstream_connect_time urt=$upstream_response_time';
+
+    # The header hygiene file sets many proxy_set_header directives, which can
+    # exceed nginx's default hash. Raising it avoids a start-up warning and a
+    # silently slower lookup on a busier config.
+    proxy_headers_hash_max_size 1024;
+    proxy_headers_hash_bucket_size 128;
+
+    # ---------------------------------------------------------------------
+    # Rate limiting: login harder than the application.
+    # ---------------------------------------------------------------------
+    limit_req_zone $binary_remote_addr zone=login_limit:10m rate=10r/m;
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=30r/s;
+
+    # ---------------------------------------------------------------------
+    # WebSocket upgrade mapping used by DSH's Remote stream mux.
+    # ---------------------------------------------------------------------
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    # ---------------------------------------------------------------------
+    # Upstreams.
+    # ---------------------------------------------------------------------
+    upstream oauth2_proxy {
+        server ${OAUTH2_PROXY_UPSTREAM};
+        keepalive 8;
+    }
+
+    upstream dsh_gateway {
+        server ${DSH_GATEWAY_UPSTREAM};
+        keepalive 8;
+    }
+
+    # ---------------------------------------------------------------------
+    # Plain HTTP: redirect only. No application content is ever served here, so
+    # a TLS misconfiguration cannot silently expose the app in clear text.
+    # ---------------------------------------------------------------------
+    server {
+        listen ${NGINX_HTTP_PORT} default_server;
+        server_name _;
+
+        location = /healthz {
+            access_log off;
+            default_type text/plain;
+            return 200 "ok\n";
+        }
+
+        location / {
+            return 308 https://${DSH_HOSTNAME}$request_uri;
+        }
+    }
+
+    # ---------------------------------------------------------------------
+    # HTTPS: the only listener that reaches the application.
+    # ---------------------------------------------------------------------
+    server {
+        listen ${NGINX_HTTPS_PORT} ssl;
+        http2 on;
+        server_name ${DSH_HOSTNAME};
+
+        # --- TLS ---------------------------------------------------------
+        ssl_certificate     /etc/nginx/tls/fullchain.pem;
+        ssl_certificate_key /etc/nginx/tls/privkey.pem;
+
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_prefer_server_ciphers off;
+        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 1d;
+        ssl_session_tickets off;
+
+        # HSTS is rendered only when the owner has confirmed TLS works. An empty
+        # value renders an empty line, which nginx accepts.
+        ${DSH_HSTS_DIRECTIVE}
+
+        # --- security headers -------------------------------------------
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+
+        # --- request bounds ---------------------------------------------
+        client_max_body_size ${NGINX_CLIENT_MAX_BODY};
+        client_body_timeout 60s;
+        client_header_timeout 20s;
+
+        # The gateway shared secret is NOT in this template. entrypoint.sh renders
+        # it into a 0600 include with a single `set $dsh_gateway_secret "...";`
+        # line, so the value is absent from this file, from Git and from the
+        # environment. Caveat: `nginx -T` prints the include, so that command is
+        # only for someone who already holds the secret.
+        include /etc/nginx/dsh/gateway-secret.conf;
+
+        # --- proxy header hygiene ---------------------------------------
+        # These LIVE IN A FILE, not here, and are included by every proxying
+        # location. Reason, verified on nginx 1.26.3: setting even one
+        # proxy_set_header inside a location discards the whole server-level set,
+        # so a server-level clear silently stops applying exactly where it is
+        # needed. The include makes the clears unconditional.
+        #
+        # Consequence for reviewers: a location that proxies upstream MUST have
+        # `include /etc/nginx/dsh/proxy-hygiene.conf;`. deploy/tests/ enforces it.
+        #
+        # This block intentionally sets no proxy_set_header itself. Any directive
+        # here would be inherited by locations that set none, and then silently
+        # dropped by locations that do — the exact trap this design avoids.
+
+        # --- authentication subrequest -----------------------------------
+        # Internal: clients cannot call it directly. Returns 202 on success.
+        location = /oauth2/auth {
+            # Internal subrequest target: a client cannot call it directly.
+            internal;
+            proxy_pass http://oauth2_proxy;
+            proxy_pass_request_body off;
+
+            # Hygiene first, then the location-specific values. Order matters for
+            # readability only; nginx applies one value per header name.
+            include /etc/nginx/dsh/proxy-hygiene.conf;
+
+            proxy_set_header Content-Length "";
+            # oauth2-proxy builds its redirect URIs from this authority, so it
+            # must be the browser-facing name, not the container name.
+            proxy_set_header Host $host;
+            proxy_set_header X-Original-URL $scheme://$host$request_uri;
+
+            # The auth subrequest is on the hot path of every request. Short
+            # timeouts keep a hung oauth2-proxy from holding a worker: a timeout
+            # yields 500, which is fail-closed (no request reaches the gateway).
+            proxy_connect_timeout 5s;
+            proxy_send_timeout    10s;
+            proxy_read_timeout    10s;
+        }
+
+        # --- public login surface ----------------------------------------
+        # Needed to reach the IdP; hands out no application data.
+        location /oauth2/ {
+            limit_req zone=login_limit burst=20 nodelay;
+            proxy_pass http://oauth2_proxy;
+
+            include /etc/nginx/dsh/proxy-hygiene.conf;
+
+            proxy_set_header Host $host;
+        }
+
+        # --- the application ----------------------------------------------
+        location / {
+            auth_request /oauth2/auth;
+            error_page 401 = @login;
+
+            # Identity captured from the auth subrequest; empty if auth did not run.
+            # The suffix makes the value single-valued for detection purposes: a
+            # comma-separated list of repeated headers cannot be spoofed because
+            # none of the inputs is client-controllable.
+            auth_request_set $auth_user  $upstream_http_x_auth_request_user;
+            auth_request_set $auth_email $upstream_http_x_auth_request_email;
+
+            # Hygiene first: this is what stops a client-smuggled Authorization,
+            # X-Forwarded-User or X-Auth-Request-Email from reaching the gateway.
+            include /etc/nginx/dsh/proxy-hygiene.conf;
+
+            # Then the identity values we obtained ourselves.
+            proxy_set_header X-DSH-Gateway-Secret $dsh_gateway_secret;
+            proxy_set_header X-Auth-Request-User  $auth_user;
+            proxy_set_header X-Auth-Request-Email $auth_email;
+
+            proxy_pass http://dsh_gateway;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade    $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+
+            # The gateway authorises on an exact authority from its allowlist and
+            # mints a cookie bound to it. Without this line nginx sends
+            # `Host: dsh_gateway` (the upstream name), and every request would be
+            # rejected with 421. Verified on nginx 1.26.3.
+            proxy_set_header Host $host;
+
+            # DSH keeps a WebSocket open for the whole session; a short read
+            # timeout would silently truncate streaming answers mid-response.
+            proxy_connect_timeout 10s;
+            proxy_send_timeout    3600s;
+            proxy_read_timeout    3600s;
+            proxy_buffering off;
+            proxy_request_buffering off;
+
+            limit_req zone=api_limit burst=120 nodelay;
+        }
+
+        # --- login redirect -------------------------------------------------
+        location @login {
+            add_header Cache-Control "no-store" always;
+            return 302 /oauth2/start?rd=$scheme://$host$request_uri;
+        }
+
+        # --- health ----------------------------------------------------------
+        location = /healthz {
+            access_log off;
+            default_type text/plain;
+            return 200 "ok\n";
+        }
+
+        access_log /var/log/nginx/dsh-access.log dsh_safe;
+        error_log  /var/log/nginx/dsh-error.log warn;
+    }
+}

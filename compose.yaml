@@ -41,6 +41,7 @@ services:
       - ./.gitignore:/workspace/core/.gitignore
       - ./README.md:/workspace/core/README.md
       - ./docs/templates/agents/global-AGENTS.md:/home/node/.dsh/AGENTS.md:ro
+      - ./deploy:/workspace/core/deploy
     # Registers built-in MCP integrations into the DSH profile, then hands over
     # to the image's own entrypoint.
     #

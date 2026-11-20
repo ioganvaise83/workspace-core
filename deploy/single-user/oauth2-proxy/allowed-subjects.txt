@@ -1,0 +1,36 @@
+# Admission allowlist for the single-user gateway.
+#
+# One entry per line. Each entry is the OIDC `sub` claim — the STABLE subject
+# identifier, not the email address and not the username (ADR-4). oauth2-proxy
+# writes this value into the `X-Auth-Request-User` header by default, and the
+# gateway compares it against its own copy of this list.
+#
+# Format:
+#   <sub>    # comment with the person's name, so the line is reviewable
+#
+# How to obtain a `sub` for a user already created in Keycloak:
+#
+#   docker compose exec keycloak \
+#     /opt/keycloak/bin/kcadm.sh config credentials \
+#       --server http://127.0.0.1:8080 --realm master \
+#       --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"
+#
+#   docker compose exec keycloak \
+#     /opt/keycloak/bin/kcadm.sh get users -r personal-ai -q username=<username> \
+#       --fields id,username,email
+#
+# The returned `id` IS the `sub` claim for that user in this realm.
+#
+# Rules:
+#   * exactly ONE line may be active in phase 1 (ADR-8). A second active entry
+#     would give two colleagues one shared Harness home. The offline test
+#     deploy/tests/check-allowlist.sh enforces this.
+#   * an email-domain rule is never a substitute for this file.
+#   * keep this file out of Git if the subjects are sensitive; the repository
+#     ignores `*.local` and `.env`, so name the real file `allowed-subjects.local`
+#     and generate it at deploy time.
+#
+# The placeholder below is intentionally inactive: a leading `#` means "no user
+# admitted yet", which is the correct deny-by-default starting state.
+#
+# <paste-the-sub-here>    # owner

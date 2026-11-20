@@ -49,6 +49,43 @@ Decisions behind it:
   pattern for any agent action that must be authorised rather than merely asked
   for: the agent can request, never grant.
 
+## Secure access and remote deployment
+
+The platform is built for one owner on a local machine. Publishing it to a network
+is a separate, documented project with its own architecture, threat model and
+deployment procedure:
+
+- [`security/secure-access-roadmap.md`](security/secure-access-roadmap.md) — phases,
+  current status, acceptance criteria, open questions. **Read this first** when
+  continuing the work.
+- [`security/threat-model.md`](security/threat-model.md) — what is defended and what
+  is not, threat by threat.
+- [`security/decisions.md`](security/decisions.md) — ADR records: why one instance
+  per user, why Keycloak authenticates but does not authorise data access, why the
+  gateway mints the DSH cookie instead of distributing the launch token.
+- [`security/deployment-guide.md`](security/deployment-guide.md) — the operational
+  procedure, including activation and rollback.
+- [`security/security-review-single-user.md`](security/security-review-single-user.md)
+  — the pre-activation review: threat/control/test table and the local end-to-end
+  plan with two identities.
+
+Deployment configuration lives in `deploy/`, never in `scripts/` or `docs/`:
+`deploy/identity/` (Keycloak + PostgreSQL, a separate compose project) and
+`deploy/single-user/` (nginx, oauth2-proxy and the cookie gateway in front of the
+existing Harness). Both are additive: the base `compose.yaml` is not modified, so
+local mode keeps working and rollback is a `docker compose down` away.
+
+Two facts from the audit of the installed 0.2.1-rc.3 binary drive the design and
+should not be re-derived:
+
+- DSH has **no** external-authentication mode; its browser cookie is the only
+  supported credential, signed with a secret stored in
+  `$DSH_HOME/.credentials.yaml`, which DSH reads rather than regenerates when the
+  record already exists. The gateway uses that seam.
+- DSH has **no** in-process multi-tenancy. The authorisation seam exists, but the
+  only principal is the owner and every browser shares it. Isolation between
+  people is achieved with separate containers, not with policy.
+
 ## Future work (not shipped)
 
 1. Versioned manifest validation and agent policy loader.

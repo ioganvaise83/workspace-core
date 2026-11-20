@@ -1,0 +1,172 @@
+# Identity infrastructure for secure access: Keycloak + PostgreSQL.
+#
+# This project is deliberately SEPARATE from the Harness compose project
+# (`../../compose.yaml`). Identity and workload have different upgrade cadences:
+# a Harness change must not log everyone out, and a Keycloak upgrade must not
+# touch the workspace. See docs/security/decisions.md, ADR-9.
+#
+# What is NOT here, on purpose:
+#   - no access to the Docker socket (an IdP must never control the workload);
+#   - no published PostgreSQL port;
+#   - no published Keycloak port in production mode — see "Exposure" below.
+#
+# Exposure model
+# --------------
+# `docker compose` publishes nothing by default. The development profile binds
+# Keycloak to 127.0.0.1 only, which is enough for the owner's own browser through
+# an SSH tunnel. Serving the login page to the corporate network is an ACTIVATION
+# step: it requires TLS, a hostname and the owner's explicit approval
+# (docs/security/deployment-guide.md, "Activation").
+#
+# Usage:
+#   cp env.example .env                       # then edit .env
+#   docker compose config                     # validate, starts nothing
+#   docker compose up -d                      # loopback Keycloak, lab only
+#   docker compose ps && docker compose logs -f keycloak
+#   docker compose stop                       # keeps volumes and data
+#   docker compose down                       # keeps volumes and data
+
+name: personal-ai-identity
+
+services:
+  postgres:
+    image: postgres:17.12-alpine@sha256:526f86d93c6ea08fd3f1fe5605650cacc781b2c6013169a0ad8f42c7d3d84f32
+    restart: unless-stopped
+    # No ports: reachable only from keycloak on this project's private network.
+    environment:
+      POSTGRES_DB: ${KC_DB_NAME:?set KC_DB_NAME in .env}
+      POSTGRES_USER: ${KC_DB_USER:?set KC_DB_USER in .env}
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:?set KC_DB_PASSWORD in .env}
+      # Keep the data directory owned by the postgres user of the image.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      # Durable identity data. Losing this volume means recreating the realm and
+      # every user; it is the one volume that must be backed up.
+      - keycloak-db:/var/lib/postgresql/data
+    healthcheck:
+      # -U and -d are required: without them pg_isready probes as the OS user and
+      # reports "accepting connections" even for a database that does not exist.
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - identity-internal
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
+    restart: unless-stopped
+    # `start` (not `start-dev`): production mode is secure by default and refuses
+    # to boot without a hostname, which is exactly the failure we want to see
+    # early. The dev profile below relaxes only the transport, never the account
+    # model.
+    command:
+      - start
+      - --http-enabled=true
+      - --hostname-strict=true
+      - --proxy-headers=xforwarded
+      - --health-enabled=true
+      # Import the realm template from ./config on first start. Keycloak imports
+      # files in data/import only when the realm does not exist yet, so restarts
+      # are safe: an existing realm is left untouched, including its users and
+      # their passwords. To re-import, delete the realm first (destructive, see
+      # README).
+      - --import-realm
+    environment:
+      # --- realm template placeholders -------------------------------------
+      # config/dsh-single-user-realm.json references these three values; Keycloak
+      # substitutes them from its own environment at import time. Without them the
+      # import fails with an unresolved placeholder, which is the correct failure:
+      # a client with an empty secret must never be created silently.
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET in .env}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:?set OIDC_REDIRECT_URI in .env}
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${OIDC_POST_LOGOUT_REDIRECT_URI:?set OIDC_POST_LOGOUT_REDIRECT_URI in .env}
+
+      # --- database ---------------------------------------------------------
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_PORT: "5432"
+      KC_DB_URL_DATABASE: ${KC_DB_NAME:?set KC_DB_NAME in .env}
+      KC_DB_USERNAME: ${KC_DB_USER:?set KC_DB_USER in .env}
+      # KCRAW_ preserves the value literally: with plain KC_ the password would be
+      # expression-evaluated and any `$` would be silently altered.
+      KCRAW_DB_PASSWORD: ${KC_DB_PASSWORD:?set KC_DB_PASSWORD in .env}
+
+      # --- public identity --------------------------------------------------
+      # The exact URL users and oauth2-proxy dial. It becomes the OIDC `iss`
+      # claim, so it must match byte for byte everywhere.
+      KC_HOSTNAME: ${KC_HOSTNAME:?set KC_HOSTNAME in .env}
+      KC_HTTP_PORT: "8080"
+      KC_HTTP_RELATIVE_PATH: /
+
+      # --- first administrator ---------------------------------------------
+      # Read only on the very first start. Once an admin exists, Keycloak logs a
+      # benign error and continues. Prefer removing these two lines from .env
+      # after the first successful login, so a leaked .env cannot re-bootstrap.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set in .env}
+      KCRAW_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set in .env}
+
+      # --- production hardening --------------------------------------------
+      KC_LOG_LEVEL: ${KC_LOG_LEVEL:-INFO}
+      # Behind a TLS terminator Keycloak must not believe hostile forwarded
+      # headers from arbitrary peers; --proxy-headers above plus this trusted
+      # proxy list narrows it to the edge network.
+      KC_PROXY_TRUSTED_ADDRESSES: ${KC_PROXY_TRUSTED_ADDRESSES:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
+    ports:
+      # Development profile only: loopback, so nothing is exposed to the network.
+      # Reaching it from the owner's workstation is an SSH tunnel:
+      #   ssh -L 8443:127.0.0.1:8443 <vm>
+      # Serving this port to the corporate network is an ACTIVATION step and
+      # requires TLS in front (see deploy/single-user/nginx).
+      - "${KC_BIND_ADDRESS:-127.0.0.1}:${KC_LOCAL_PORT:-8443}:8080"
+    volumes:
+      # Realm import, themes and any provider jar. Read-only: the running server
+      # must never mutate its configuration directory.
+      - ./config:/opt/keycloak/data/import:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # Management interface (port 9000) is separate from the application port;
+      # health endpoints live there when http-management-health-enabled is true.
+      # In the Keycloak image there is no shell-free HTTP client, so use bash.
+      test:
+        - "CMD-SHELL"
+        - "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q 'UP' <&3"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+    networks:
+      - identity-internal
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # Private network: no ingress from outside this compose project. The edge
+  # network is joined at activation time by the single-user gateway project.
+  identity-internal:
+    name: ${IDENTITY_NETWORK:-personal-ai-identity-internal}
+    driver: bridge
+
+volumes:
+  keycloak-db:
+    name: ${KC_DB_VOLUME:-personal-ai-keycloak-db}
+
+# There is deliberately no second "production" service definition: a duplicate
+# would drift from the one above. Production differences are configuration only
+# (hostname, TLS termination, trusted proxies) and live in .env and in the nginx
+# layer, not in a parallel YAML block.

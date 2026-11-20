@@ -46,11 +46,38 @@ docs/
   applications.md             workspace-apps boundaries and registry
   app-development.md          mandatory policy for building applications
   agent-development.md        safe development rules
+  security/                   secure access: roadmap, threat model, ADRs, deployment
   env.example.txt             documented variables (copy to .env.example)
   gitattributes.txt           line-ending rules (copy to .gitattributes)
   app-template/               copyable skeleton for a new application
 plugins/                      reusable DSH plugins (installed explicitly)
+deploy/
+  identity/                   Keycloak + PostgreSQL (separate compose project)
+  single-user/                nginx, oauth2-proxy, cookie gateway in front of Harness
+  tests/                      offline security checks
 ```
+
+## Publishing it to a network
+
+Local mode assumes one person on one machine. Putting the workspace on a corporate
+VM, reachable by colleagues, is a separate project with its own design:
+
+- [`docs/security/secure-access-roadmap.md`](docs/security/secure-access-roadmap.md)
+  — phases, status, acceptance criteria, open questions.
+- [`docs/security/threat-model.md`](docs/security/threat-model.md) — threats,
+  controls, residual risk.
+- [`docs/security/decisions.md`](docs/security/decisions.md) — architecture
+  decisions and their rationale.
+- [`docs/security/deployment-guide.md`](docs/security/deployment-guide.md) — step by
+  step, including what requires the owner's explicit approval.
+- [`docs/security/security-review-single-user.md`](docs/security/security-review-single-user.md)
+  — pre-activation review, residual risks and the local end-to-end test plan.
+
+The short version: identity comes from a corporate OIDC provider, only a reverse
+proxy publishes a port, the Harness never becomes a user-management system, and
+each person eventually gets a separate Harness instance rather than a shared
+session. Local mode keeps working; nothing in `deploy/` modifies the base
+`compose.yaml`.
 
 ## Quick start
 
