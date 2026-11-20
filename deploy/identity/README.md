@@ -4,12 +4,36 @@ Identity infrastructure for the secure-access deployment. **Separate project**
 from the Harness compose file on purpose (ADR-9): identity and workload have
 different upgrade cadences.
 
-```sh
-cp env.example .env      # then edit
-chmod 600 .env
-docker compose config    # validate, starts nothing
+```powershell
+Copy-Item env.example .env    # then edit
+docker compose config         # validate, starts nothing
 docker compose up -d
 ```
+
+Before the first start, two host-side steps are required — see
+[`docs/security/deployment-guide.md`](../../docs/security/deployment-guide.md) §2b:
+
+1. a local root CA trusted by Windows, and certificates for `keycloak.local`;
+2. `127.0.0.1 keycloak.local` in the hosts file.
+
+### Base file vs lab overlay
+
+`compose.yaml` is what runs today: HTTP on loopback. It is deliberately free of
+lab prerequisites, so an ordinary `docker compose up -d` never fails because a
+certificate or a network is missing.
+
+`compose.lab.yml` adds what the SSO test needs — HTTPS on `8443` terminated by
+Keycloak itself, and the shared `edge` network with the `keycloak.local` alias:
+
+```powershell
+docker network create personal-ai-edge     # once
+docker compose -f compose.yaml -f compose.lab.yml up -d
+```
+
+Use the overlay only while testing SSO. Without it, nothing changes.
+
+The import-strategy fix is in the **base** file on purpose: it protects the realm
+on every restart, lab or not.
 
 Full procedure, including realm import, user creation, MFA and how to obtain the
 `sub` for the allowlist: [`docs/security/deployment-guide.md`](../../docs/security/deployment-guide.md) §3.
@@ -28,7 +52,7 @@ which is a governance problem rather than a technical one.
 | Path | Role |
 |---|---|
 | `compose.yaml` | Keycloak 26.8.2 + PostgreSQL 17.12, pinned by tag and digest |
-| `config/dsh-single-user-realm.json` | Realm template: confidential client, PKCE, groups, audience mapper, brute-force protection |
+| `config/personal-ai-realm.json` | Realm template. The file name MUST match the realm name inside (`personal-ai`), or Keycloak refuses it with "File name / realm name mismatch" |
 | `env.example` | Every non-secret setting, with safe defaults |
 
 ## Deliberate design points
@@ -43,6 +67,11 @@ which is a governance problem rather than a technical one.
 - **`start`, not `start-dev`.** Production mode refuses to boot without a
   hostname, which surfaces a misconfiguration immediately instead of silently
   running an insecure default.
+- **`IGNORE_EXISTING` import strategy.** Not optional. Keycloak runs the directory
+  import on every start and its default, `OVERWRITE_EXISTING`, deletes the existing
+  realm — users, MFA enrolments, the client secret — before re-importing. A plain
+  restart would silently reset the owner's account. Verified in Keycloak 26.8.2
+  source; pinned in `compose.yaml` and defaulted in `env.example`.
 - **`KCRAW_` for secrets.** With plain `KC_`, Keycloak evaluates `$` as an
   expression and can silently corrupt a password.
 - **Bootstrap admin only once.** `KC_BOOTSTRAP_ADMIN_*` is read while no admin
@@ -84,7 +113,7 @@ realm. The supported routes are, in order of preference:
 3. **Partial import / re-bootstrap** — stop Keycloak, temporarily clear the admin
    user from the database (not recommended; destructive), or restore the volume
    from backup.
-4. **Recreate the realm** from `config/dsh-single-user-realm.json` and re-add
+4. **Recreate the realm** from `config/personal-ai-realm.json` and re-add
    users. The OIDC client secret changes: copy it into
    `deploy/single-user/secrets/oidc-client-secret` and restart oauth2-proxy.
 

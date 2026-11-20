@@ -1,0 +1,66 @@
+# Lab overlay: serve Keycloak over HTTPS on one origin shared with oauth2-proxy.
+#
+# WHY AN OVERLAY AND NOT A CHANGE TO compose.yaml
+#
+# The base `deploy/identity/compose.yaml` is what the owner already runs. Editing
+# it to require TLS material and an external Docker network would make the next
+# ordinary `docker compose up -d` fail — the certs do not exist yet and the network
+# has not been created. A deployment must not break the working installation as a
+# side effect of preparing a test.
+#
+# So the base stays exactly as it was, and this file adds the lab-only parts:
+#
+#   docker compose -f compose.yaml -f compose.lab.yml up -d
+#
+# Nothing here publishes a port beyond loopback, and none of it is required by the
+# base file.
+#
+# Prerequisites (see docs/security/deployment-guide.md §2b):
+#   * certificates at $KC_TLS_DIR  (scripts/new-local-ca.ps1)
+#   * the shared network:          docker network create personal-ai-edge
+#   * KC_HOSTNAME=https://keycloak.local:8443 in .env
+
+services:
+  keycloak:
+    command:
+      - start
+      - --hostname-strict=true
+      - --proxy-headers=xforwarded
+      - --health-enabled=true
+      # HTTPS on the browser-facing port. Keycloak terminates TLS itself so that
+      # the OIDC issuer is the SAME origin for the Windows browser and for
+      # oauth2-proxy inside Docker. A container cannot reach the host as
+      # 127.0.0.1, so "browser on one origin, proxy on another" is exactly the
+      # trap this avoids.
+      - --https-port=${KC_HTTPS_PORT:-8443}
+      - --https-certificate-file=/opt/keycloak/certs/fullchain.pem
+      - --https-certificate-key-file=/opt/keycloak/certs/privkey.pem
+      # HTTP stays enabled on an internal port for the healthcheck and kcadm.sh;
+      # it is never published.
+      - --http-enabled=true
+      - --http-port=${KC_HTTP_INTERNAL_PORT:-8080}
+      # Inherited deliberately: the realm must never be re-imported over itself.
+      - --spi-import--dir--strategy=${KC_IMPORT_STRATEGY:-IGNORE_EXISTING}
+      - --import-realm
+    ports:
+      # Replaces the base HTTP mapping. Loopback only, HTTPS only.
+      - "${KC_BIND_ADDRESS:-127.0.0.1}:${KC_LOCAL_PORT:-8443}:${KC_HTTPS_PORT:-8443}"
+    volumes:
+      - ./config:/opt/keycloak/data/import:ro
+      # TLS material: outside Git, read-only.
+      - ${KC_TLS_DIR:?set KC_TLS_DIR in .env}:/opt/keycloak/certs:ro
+    networks:
+      identity-internal: {}
+      edge:
+        # oauth2-proxy and the gateway live in the single-user project and must
+        # reach Keycloak by this name. Without the alias they would have to dial
+        # the Windows host, which no container can do.
+        aliases:
+          - keycloak.local
+
+networks:
+  # Shared with deploy/single-user, which creates it. Declared external here
+  # because this project only joins it.
+  edge:
+    name: ${EDGE_NETWORK:-personal-ai-edge}
+    external: true
