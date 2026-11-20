@@ -1,36 +1,47 @@
-# Admission allowlist for the single-user gateway.
+# Admission allowlist — SUBJECT list consumed by the identity gateway.
 #
-# One entry per line. Each entry is the OIDC `sub` claim — the STABLE subject
-# identifier, not the email address and not the username (ADR-4). oauth2-proxy
-# writes this value into the `X-Auth-Request-User` header by default, and the
-# gateway compares it against its own copy of this list.
+# READ THIS FIRST: this file is NOT the file oauth2-proxy uses to deny people.
 #
-# Format:
-#   <sub>    # comment with the person's name, so the line is reviewable
+# oauth2-proxy's `authenticated_emails_file` is matched against the session EMAIL
+# address (verified in v7.15.6: `p.Validator(session.Email)`), not against the OIDC
+# `sub`. Putting a `sub` there matches nothing and therefore denies nobody — it is
+# a fail-OPEN trap.
 #
-# How to obtain a `sub` for a user already created in Keycloak:
+# Admission is enforced in two places that DO work:
 #
-#   docker compose exec keycloak \
+#   1. oauth2-proxy:   `allowed_groups = ["dsh-users"]`
+#                      Membership is asserted by Keycloak in the `groups` claim.
+#
+#   2. The gateway:    GATEWAY_ALLOWED_SUBJECTS in .env, and/or this file.
+#                      The gateway compares the exact `sub` before minting a DSH
+#                      cookie, so a user who reaches it without a listed subject
+#                      gets 403 and never touches the harness.
+#
+# Format for THIS file: one OIDC `sub` per line, `#` starts a comment.
+#
+# How to obtain the real `sub` — never guess, and never assume it equals the
+# username or the email:
+#
+#   docker compose -f deploy/identity/compose.yaml exec keycloak \
 #     /opt/keycloak/bin/kcadm.sh config credentials \
 #       --server http://127.0.0.1:8080 --realm master \
 #       --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"
 #
-#   docker compose exec keycloak \
-#     /opt/keycloak/bin/kcadm.sh get users -r personal-ai -q username=<username> \
-#       --fields id,username,email
+#   docker compose -f deploy/identity/compose.yaml exec keycloak \
+#     /opt/keycloak/bin/kcadm.sh get users -r personal-ai \
+#       -q username=workspace-owner --fields id,username,email
 #
 # The returned `id` IS the `sub` claim for that user in this realm.
 #
 # Rules:
-#   * exactly ONE line may be active in phase 1 (ADR-8). A second active entry
-#     would give two colleagues one shared Harness home. The offline test
-#     deploy/tests/check-allowlist.sh enforces this.
-#   * an email-domain rule is never a substitute for this file.
-#   * keep this file out of Git if the subjects are sensitive; the repository
-#     ignores `*.local` and `.env`, so name the real file `allowed-subjects.local`
-#     and generate it at deploy time.
+#   * exactly ONE active line while phase 1 is in force (ADR-8). Two active entries
+#     would give two colleagues one shared Harness home.
+#   * the test user `workspace-test-denied` must NEVER appear here.
+#   * `kc-admin` must never appear here either: the realm administrator is not a
+#     Harness user.
+#   * name the real file `allowed-subjects.local` and keep it out of Git; the
+#     repository ignores `*.local` and `.env`.
 #
-# The placeholder below is intentionally inactive: a leading `#` means "no user
-# admitted yet", which is the correct deny-by-default starting state.
+# Deny-by-default starting state: no active entry.
 #
-# <paste-the-sub-here>    # owner
+# <paste-the-sub-here>    # workspace-owner

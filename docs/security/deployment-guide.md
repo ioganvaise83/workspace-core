@@ -89,6 +89,94 @@ Recreating the Harness is safe for data — sessions, profiles and credentials l
 on the `dsh-home` volume — but it drops in-flight sessions, so do it when nobody
 is mid-answer.
 
+## 2b. Local lab addressing (the part that decides whether SSO can work at all)
+
+A container cannot reach the Windows host as `127.0.0.1`: inside a container that
+address is the container itself. This is the single most common reason a local
+OIDC setup fails, and the usual "fixes" — pointing the browser at one origin and
+the proxy at another, or disabling the issuer check — are exactly what must not be
+done.
+
+### The scheme
+
+One origin, used by everybody:
+
+```text
+https://keycloak.local:8443        Keycloak, TLS terminated by Keycloak itself
+https://dsh.local                  Harness, TLS terminated by nginx
+```
+
+| Who | How the name resolves | Reaches |
+|---|---|---|
+| Windows browser | hosts file → `127.0.0.1` | the published loopback ports |
+| oauth2-proxy container | Docker network alias `keycloak.local` | the Keycloak container |
+| nginx container | `dsh_gateway` / `oauth2-proxy` service names | internal services |
+| gateway container | `harness:3080` | the Harness |
+
+Because the issuer is `https://keycloak.local:8443/realms/personal-ai` from every
+vantage point, issuer verification stays on and nothing is rewritten.
+
+### Step 1 — certificates (no elevation)
+
+```powershell
+cd D:\Projects\workspace-core
+.\deploy\single-user\scripts\new-local-ca.ps1 -OutDir .\deploy\secrets\tls
+```
+
+Produces a local root CA and two leaf certificates (`dsh.local`,
+`keycloak.local`), and verifies each leaf against the CA. The CA private key lives
+in `deploy/secrets/tls/ca/` and must never be committed.
+
+### Step 2 — trust the root CA (ELEVATED)
+
+```powershell
+# Elevated PowerShell, once per machine.
+$ca = "D:\Projects\workspace-core\deploy\secrets\tls\ca\local-ca.crt"
+Import-Certificate -FilePath $ca -CertStoreLocation Cert:\LocalMachine\Root
+
+# Verify
+Get-ChildItem Cert:\LocalMachine\Root |
+  Where-Object { $_.Subject -like '*Personal AI Workspace Local CA*' }
+```
+
+Without elevation, the per-user store is the fallback, but some tools ignore it:
+
+```powershell
+Import-Certificate -FilePath $ca -CertStoreLocation Cert:\CurrentUser\Root
+```
+
+### Step 3 — hosts entries (ELEVATED)
+
+```powershell
+$hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
+Add-Content -Path $hosts -Value "`n127.0.0.1 dsh.local`n127.0.0.1 keycloak.local"
+
+# Verify both resolve to loopback
+Resolve-DnsName dsh.local | Select-Object Name, IPAddress
+Resolve-DnsName keycloak.local | Select-Object Name, IPAddress
+```
+
+These two lines are inert unless something listens on those ports, and both
+listeners stay on `127.0.0.1`, so no other machine on any network can use them.
+
+### Step 4 — prove TLS works BEFORE starting the stack
+
+```powershell
+# The discovery document must load with no certificate warning:
+Start-Process "https://keycloak.local:8443/realms/personal-ai/.well-known/openid-configuration"
+```
+
+If the browser warns, the CA is not trusted yet — fix that first. Do not proceed,
+and never work around it by ignoring the warning.
+
+### What is intentionally absent
+
+- No `--insecure` flag anywhere, in any component.
+- No Keycloak port published on a network address; it stays `127.0.0.1`.
+- No wildcard bind in nginx.
+- No corporate DNS name is claimed to work locally. `dsh.local` and
+  `keycloak.local` are lab names and are labelled as such.
+
 ## 3. Identity provider
 
 ### 3.1 Start Keycloak (lab, local only)
@@ -135,7 +223,7 @@ docker compose exec keycloak \
 
 docker compose exec keycloak \
   /opt/keycloak/bin/kcadm.sh create realms -r master \
-  -f /opt/keycloak/data/import/dsh-single-user-realm.json
+  -f /opt/keycloak/data/import/personal-ai-realm.json
 ```
 
 The template references `${OIDC_CLIENT_SECRET}`, `${OIDC_REDIRECT_URI}` and
@@ -372,6 +460,162 @@ sudo ufw allow from <admin-cidr> to any port 22 proto tcp
 sudo ufw allow from <corp-cidr> to any port 443 proto tcp
 sudo ufw enable
 ```
+
+## 5b. Local SSO test run (Part B — needs the owner's approval)
+
+This is the controlled local run. Nothing here is performed by the agent without a
+separate, explicit go-ahead.
+
+### Preconditions
+
+- Steps in §2b are done: CA trusted, both hosts names resolve, TLS verified in a
+  browser.
+- `deploy/identity/.env` and `deploy/single-user/.env` exist and are filled.
+- The realm already exists and is configured (it does), so the realm import is a
+  no-op thanks to `IGNORE_EXISTING`.
+
+### Step 1 — point the existing client at the local redirect URI
+
+The client was imported with the placeholder redirect. Fix it with the admin API;
+do NOT re-import the realm.
+
+```powershell
+docker compose -f deploy/identity/compose.yaml exec keycloak `
+  /opt/keycloak/bin/kcadm.sh config credentials `
+    --server http://127.0.0.1:8080 --realm master `
+    --user $env:KC_BOOTSTRAP_ADMIN_USERNAME --password $env:KC_BOOTSTRAP_ADMIN_PASSWORD
+
+docker compose -f deploy/identity/compose.yaml exec keycloak `
+  /opt/keycloak/bin/kcadm.sh get clients -r personal-ai `
+    -q clientId=dsh-single-user --fields id
+```
+
+Then update only the redirect fields, keeping everything else:
+
+```powershell
+$clientId = "<the id printed above>"
+docker compose -f deploy/identity/compose.yaml exec keycloak `
+  /opt/keycloak/bin/kcadm.sh update clients/$clientId -r personal-ai `
+    -s 'redirectUris=["https://dsh.local/oauth2/callback"]' `
+    -s 'attributes."post.logout.redirect.uris"=https://dsh.local/'
+```
+
+Verify:
+
+```powershell
+docker compose -f deploy/identity/compose.yaml exec keycloak `
+  /opt/keycloak/bin/kcadm.sh get clients/$clientId -r personal-ai `
+    --fields redirectUris,attributes
+```
+
+### Note on `kcadm.sh` and the HTTPS listener
+
+The admin commands below run **inside** the Keycloak container against the internal
+HTTP port (`127.0.0.1:8080`), which is enabled for exactly this purpose and never
+published. `KC_HOSTNAME` is `https://keycloak.local:8443`, so Keycloak's
+frontend URLs are correct for browsers while local administration stays simple.
+
+If a `kcadm.sh` call is redirected to HTTPS (it follows redirects), the internal
+HTTP listener is not answering admin requests in your build. In that case run the
+same command with the internal HTTPS origin and the CA mounted into the container:
+
+```powershell
+docker compose -f deploy/identity/compose.yaml exec keycloak `
+  /opt/keycloak/bin/kcadm.sh config credentials `
+    --server https://keycloak.local:8443 --realm master `
+    --user $env:KC_BOOTSTRAP_ADMIN_USERNAME --password $env:KC_BOOTSTRAP_ADMIN_PASSWORD `
+    --trustpass changeit
+```
+
+`--trustpass` alone does not import a CA; if verification fails, prefer the
+Admin Console over copying CA material into the container. Record which route
+worked in the lab notes — this is the one step that could not be verified offline.
+
+### Step 2 — obtain the owner's real subject
+
+Never guess it, and never use the username or email.
+
+```powershell
+docker compose -f deploy/identity/compose.yaml exec keycloak `
+  /opt/keycloak/bin/kcadm.sh get users -r personal-ai `
+    -q username=workspace-owner --fields id,username,email
+```
+
+Put the `id` value into `deploy/single-user/.env`:
+
+```text
+GATEWAY_ALLOWED_SUBJECTS=<the id>
+```
+
+and confirm the owner is a member of the `dsh-users` group:
+
+```powershell
+docker compose -f deploy/identity/compose.yaml exec keycloak `
+  /opt/keycloak/bin/kcadm.sh get users -r personal-ai `
+    -q username=workspace-owner --fields groups
+```
+
+`workspace-test-denied` must NOT be in that group, and must never appear in the
+allowlist.
+
+### Step 3 — align the DSH cookie secret
+
+The gateway must hold the same signing secret DSH uses. Procedure in §4.1. The
+gateway reads it from a file; the value must never appear in a log or a terminal
+transcript you keep.
+
+### Step 4 — start the stack
+
+```powershell
+# Once. The lab overlay needs it; the base identity file does not.
+docker network create personal-ai-edge
+
+# The lab overlay adds HTTPS and the shared network to the EXISTING identity
+# project. The base file is untouched, so the owner's ordinary `up -d` keeps
+# working whether or not the lab is enabled.
+docker compose -f deploy/identity/compose.yaml -f deploy/identity/compose.lab.yml up -d
+
+docker compose -f deploy/single-user/compose.yaml up -d
+docker compose -f deploy/single-user/compose.yaml ps
+docker compose -f deploy/single-user/compose.yaml logs -f nginx gateway oauth2-proxy
+```
+
+### Step 5 — run the ten tests
+
+| # | Test | Expected |
+|---|---|---|
+| 1 | Open `https://dsh.local/` anonymously | redirect to Keycloak |
+| 2 | Log in as `workspace-owner`, complete OTP | the existing Harness opens |
+| 3 | Log in as `workspace-test-denied` | 403 at the proxy, no Harness request |
+| 4 | `https://dsh.local/api` without a session | redirect or 401, never a result |
+| 5 | Streaming answer and WebSocket | work for the owner, refused anonymously |
+| 6 | Ask for mail | Mail MCP answers; no token in any output |
+| 7 | Log out | the protected URL no longer serves the Harness |
+| 8 | Stop Keycloak | new logins fail; see the session window below |
+| 9 | Restart everything | sessions and settings survive; login still works |
+| 10 | Roll back (§9) | local mode returns without data loss |
+
+Record each result as an actual HTTP status or a screenshot, not as "configured".
+
+### Step 6 — logout, honestly
+
+DSH has no logout endpoint. "Logging out" means two separate actions:
+
+- `https://dsh.local/oauth2/sign_out` ends the proxy session;
+- clearing the `dsh-auth-*` cookie ends the DSH session.
+
+If only the first is done, the DSH cookie keeps working until it expires. Test 7
+must therefore clear both, and the result must be recorded per component.
+
+### Session window when Keycloak is down (test 8)
+
+- New logins: impossible, fail-closed.
+- Existing proxy sessions: valid until `cookie_expire` (8h) or the next refresh
+  attempt, whichever comes first.
+- Existing DSH cookies: valid until `GATEWAY_COOKIE_MAX_AGE_SECONDS` (1 day).
+
+That window is the documented residual risk. It is why revocation also rotates the
+cookie secret.
 
 ## 6. Activation — requires explicit owner approval
 

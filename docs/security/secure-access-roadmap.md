@@ -137,7 +137,7 @@ Deliverables and their state:
 | nginx site config | `deploy/single-user/nginx/` | TESTED (real `nginx -t`) |
 | oauth2-proxy config | `deploy/single-user/oauth2-proxy/` | TESTED (TOML parsed, options verified against v7.15.6 source) |
 | Gateway (cookie minting) | `deploy/single-user/gateway/` | TESTED (unit + contract against live DSH) |
-| Env templates | `deploy/*/env.example` | IMPLEMENTED |
+| Env templates | `deploy/*/env.example` | TESTED |
 | Offline security checks | `deploy/tests/` | TESTED (63 checks, 39 node tests) |
 | Deployment guide | `docs/security/deployment-guide.md` | IMPLEMENTED |
 | Live verification on VM | — | NOT_STARTED |
@@ -176,6 +176,53 @@ breaking the design outright:
 
 Each fix has a regression test that was verified to fail when the fix is
 reverted (mutation-checked), because a test that cannot fail is worse than none.
+
+### Phase 1B — Local SSO end-to-end (lab, single laptop)
+
+**Status: IMPLEMENTED + TESTED (offline/lab). Not VERIFIED (live): no corporate VM,
+and the real Keycloak run needs the owner's approval for activation.**
+
+Goal: prove the whole chain — browser → nginx → oauth2-proxy → Keycloak → gateway
+→ existing Harness — on one laptop, with two real identities.
+
+#### Defects found and fixed in this phase
+
+| Id | Severity | Finding | State |
+|---|---|---|---|
+| F-5 | critical | `--import-realm` ran on **every** start, and the default strategy `OVERWRITE_EXISTING` DELETES the existing realm (users, MFA, client secret) before re-importing. Verified in Keycloak 26.8.2 `DirImportProvider`/`ImportUtils` | fixed: strategy pinned to `IGNORE_EXISTING` |
+| F-6 | critical | `authenticated_emails_file` is matched against the session **email**, not `sub` (`p.Validator(session.Email)` in oauth2-proxy v7.15.6). A subject list there denies nobody — a fail-OPEN mistake | fixed: email file removed; admission is the IdP group + the gateway's subject check |
+| F-7 | critical | `allowed_groups = ["/dsh-users"]` had a leading slash while the realm mapper uses `full.path=false`, which emits `dsh-users`. It would have denied **everyone**, including the owner | fixed: `["dsh-users"]` |
+| F-8 | high | realm file name `dsh-single-user-realm.json` did not match realm `personal-ai`; Keycloak refuses this and the tracked template was broken even though the local copy was renamed | fixed: `personal-ai-realm.json` + 8 stale references |
+| F-9 | high | both `env.example` files used `KEY: VALUE`, which Compose ignores silently | fixed to `KEY=VALUE`; a test now enforces it |
+| F-10 | high | the OIDC issuer was the unresolvable corporate placeholder, and containers cannot reach the Windows host as `127.0.0.1` | fixed: one shared origin `keycloak.local:8443` with TLS on Keycloak itself |
+
+#### Local lab results (real nginx + real gateway + real DSH)
+
+| # | Test | Result | Class |
+|---|---|---|---|
+| 1 | anonymous → Keycloak redirect | 302 | offline |
+| 2 | owner (`owner-sub` allowlisted) | 200 | offline |
+| 3 | authenticated but not allowlisted | 403 | offline |
+| 4 | API without session | 302 | offline |
+| 5 | WebSocket anonymous / denied / owner | 302 / 403 / 101 | offline |
+| — | smuggled `X-Auth-Request-User`, `X-Forwarded-User`, `Authorization` | 302 | offline |
+| — | foreign `Host` | 421 | offline |
+| — | direct gateway, bypassing nginx | 403 | offline |
+| — | direct DSH, bypassing the gateway | 401 | offline |
+| — | cookie attributes | `HttpOnly; Secure; SameSite=Strict; Max-Age` | offline |
+| 7b | access and gateway logs | no token, cookie or secret | offline |
+| 8 | oauth2-proxy down | 500, backend unreachable | offline |
+| 8 | gateway down | 502 | offline |
+
+Reproduced with: `deploy/tests/e2e-local.sh` (automated, stand-in proxy) and a
+manual run against `dsh.local` / `keycloak.local` with a private CA.
+
+#### What is NOT tested
+
+- A real Keycloak login in a browser, MFA enrolment, and the redirect round-trip.
+  That is Part B and needs the owner's approval.
+- Windows trust-store import and the hosts file. Both need elevation.
+- Anything on a VM or a corporate network.
 
 ### Phase 2 — Design for several users
 
@@ -299,6 +346,9 @@ Until every item is `VERIFIED (live)`, phase 1 is not done.
 | Security review (pre-activation) | IMPLEMENTED | [`security-review-single-user.md`](security-review-single-user.md); 4 defects found and fixed |
 | Offline security test suite | TESTED | 66 checks + 49 node tests, all green |
 | Local end-to-end harness | TESTED | `e2e-local.sh`: 16/16 with both identities on real nginx + gateway + DSH |
+| Local SSO lab (Phase 1B) | TESTED | real stack on `dsh.local`; see the Phase 1B table |
+| Env templates | TESTED | `check-env-templates.sh`: 19 checks, mutation-verified |
+| Real Keycloak browser login | NOT_STARTED | Part B, needs owner approval |
 | Live VM verification | NOT_STARTED | needs corporate VM |
 | Corporate IdP availability | BLOCKED | owner must confirm whether one exists |
 | Phase 2 design | NOT_STARTED | — |

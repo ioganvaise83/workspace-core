@@ -36,18 +36,25 @@ the stored secret is accepted (200), one minted for another authority is rejecte
 | `nginx/nginx.conf.template` | whole config: TLS, `auth_request`, WebSocket, safe logging |
 | `nginx/entrypoint.sh` | renders the template, writes the 0600 secret include, runs `nginx -t` |
 | `oauth2-proxy/oauth2-proxy.cfg` | OIDC + PKCE, subject allowlist, header hygiene |
-| `oauth2-proxy/allowed-subjects.txt` | template allowlist, no active entry (deny by default) |
+| `oauth2-proxy/allowed-subjects.txt` | documentation of the subject allowlist; see the warning in that file — oauth2-proxy's own email file cannot enforce it |
+| `scripts/new-local-ca.ps1` | creates the local CA and both leaf certificates |
 | `gateway/server.js` | dependency-free Node gateway that mints the DSH cookie |
 | `scripts/prepare-secrets.sh` | generates host secrets, `chmod 600`, never prints values |
 | `env.example` | every non-secret setting |
 
 ## Quick start
 
-```sh
-cp env.example .env && chmod 600 .env     # then fill in real values
-./scripts/prepare-secrets.sh              # generates secrets under ./secrets
-docker compose config --quiet             # validate, starts nothing
+```powershell
+Copy-Item env.example .env                  # then fill in real values
+bash ./scripts/prepare-secrets.sh           # generates secrets under ./secrets
+docker compose config --quiet               # validate, starts nothing
 ```
+
+Defaults are the **local lab** names: `dsh.local` for the Harness and
+`https://keycloak.local:8443` for the issuer. Both resolve to `127.0.0.1` on the
+host and to the right container inside Docker, so the OIDC issuer is identical
+everywhere and no verification is relaxed. Setup:
+[`docs/security/deployment-guide.md`](../../docs/security/deployment-guide.md) §2b.
 
 Then follow [`docs/security/deployment-guide.md`](../../docs/security/deployment-guide.md)
 — in particular §4.1, which gives DSH the same cookie secret as the gateway. Skip

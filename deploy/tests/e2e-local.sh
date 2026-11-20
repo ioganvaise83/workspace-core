@@ -20,7 +20,7 @@
 #   - an nginx binary: set NGINX_BIN, or have `nginx` on PATH
 #   - a running DSH on loopback with a KNOWN cookie secret, e.g.
 #       DSH_HOME=/tmp/dsh-e2e dsh web --no-open --host 127.0.0.1 --port 3199 \
-#         --public-url https://dsh.corp.example/ --trusted-host dsh.corp.example
+#         --public-url https://dsh.local/ --trusted-host dsh.local
 #     The secret is read from $DSH_HOME/.credentials.yaml and must be written to
 #     the file named by DSH_COOKIE_SECRET_FILE.
 #   - openssl, for the throwaway self-signed certificate
@@ -37,7 +37,7 @@ SINGLE="$REPO_ROOT/deploy/single-user"
 WORK=${E2E_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/dsh-e2e.XXXXXX")}
 
 DSH_PORT=${DSH_PORT:-3199}
-AUTHORITY=${AUTHORITY:-dsh.corp.example}
+AUTHORITY=${AUTHORITY:-dsh.local}
 OWNER_SUB=${OWNER_SUB:-owner-sub}
 FOREIGN_SUB=${FOREIGN_SUB:-foreign-sub}
 

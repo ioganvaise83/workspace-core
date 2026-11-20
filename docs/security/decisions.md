@@ -345,3 +345,152 @@ characters, and compared in constant time.
 documented at the reading function so a future reader does not "unify" them.
 
 **Revisit never.**
+
+---
+
+## ADR-16 — One shared origin for Keycloak, with TLS on Keycloak itself
+
+**Status:** Accepted (implemented, tested offline)
+
+**Context.** The lab first used `http://127.0.0.1:8443` as the issuer. Inside a
+container, `127.0.0.1` is that container, so oauth2-proxy could not reach Keycloak
+at all, and "fixing" it by pointing the browser at one origin and the proxy at
+another breaks the OIDC issuer check: the `iss` in the discovery document must
+equal the URL the client was configured with, character for character.
+
+The tempting workarounds are all unacceptable: disabling issuer verification,
+skipping TLS verification, or publishing Keycloak on a network address.
+
+**Decision.** Every component uses **one** origin: `https://keycloak.local:8443`.
+
+- On Windows, `keycloak.local` resolves to `127.0.0.1` via the hosts file.
+- Inside Docker, `keycloak.local` is a **network alias** of the Keycloak container
+  on the shared `edge` network, so oauth2-proxy reaches it by name.
+- Keycloak terminates TLS itself with a certificate for `keycloak.local`, signed
+  by a local root CA that the host trusts and that oauth2-proxy trusts via
+  `provider_ca_files`.
+
+**Consequences.** The issuer is identical on every side, so no verification is
+relaxed and no hostname rewriting is needed. The cost is two host-side
+prerequisites, both requiring elevation once: import the root CA, and add two
+hosts entries. The corporate migration is then a pure rename: real DNS, a real
+certificate, the same configuration shape.
+
+**Revisit never**; the alternative is disabling verification, which this project
+forbids.
+
+## ADR-17 — Local lab names, never the corporate placeholders
+
+**Status:** Accepted
+
+**Context.** The templates shipped `dsh.corp.example` and `id.corp.example`. These
+do not resolve anywhere, so a "working" local test was impossible, and a developer
+who made them work by editing `/etc/hosts` would then be testing a name that the
+corporate deployment does not use either.
+
+**Decision.** Templates default to `dsh.local` and `keycloak.local`, which are
+explicitly lab names. The corporate migration replaces exactly three values —
+`KC_HOSTNAME`, `DSH_HOSTNAME`, `OIDC_ISSUER_URL` — and nothing else. The env test
+fails if a template reverts to a `*.corp.example` placeholder, so the difference
+between "configured" and "pretending" stays visible.
+
+**Consequences.** A local test proves the shape of the deployment, not the
+corporate domain. That distinction is recorded in every status table.
+
+**Revisit never.**
+
+## ADR-18 — Admission is a group claim plus a subject check, never an email file
+
+**Status:** Accepted (corrects a design error)
+
+**Context.** The design assumed `authenticated_emails_file` enforces the subject
+allowlist. It does not: oauth2-proxy calls `p.Validator(session.Email)`, so the
+file is matched against the **email address**. A `sub` written there matches
+nothing, which means it denies nobody — a control that looks present and enforces
+nothing is worse than no control, because it stops further review.
+
+**Decision.** Two gates, both verified:
+
+1. `allowed_groups = ["dsh-users"]` on oauth2-proxy. Keycloak asserts membership in
+   the `groups` claim; a non-member is refused at the proxy, before nginx proxies
+   anything. The group name must exactly match the mapper output, which is
+   `dsh-users` (no leading slash) because the realm uses `full.path=false`.
+2. `GATEWAY_ALLOWED_SUBJECTS` on the gateway: the exact OIDC `sub` is compared
+   before any cookie is minted.
+
+The email file is not configured at all, because pointing it at a missing file
+makes oauth2-proxy exit at start-up (`logger.Fatalf`), and pointing it at our
+subject list would look like a working control.
+
+**Consequences.** Denying a colleague requires either group removal (immediate, at
+the IdP) or a subject edit plus a gateway restart. Both are explicit. The subject
+is never an email, so a rename cannot move access.
+
+**Revisit never.**
+
+## ADR-19 — The realm import must never be able to destroy a live realm
+
+**Status:** Accepted (critical fix)
+
+**Context.** `--import-realm` runs the directory import on **every** start while
+the import directory is configured. Keycloak's default strategy is
+`OVERWRITE_EXISTING`, which removes the existing realm — users, MFA enrolments, the
+client secret — before re-importing the template. Verified in 26.8.2
+(`DirImportProviderFactory` default, `ImportUtils.importRealm` removing the realm).
+A restart of the identity project would therefore have silently reset the owner's
+account and wiped the MFA enrolment.
+
+**Decision.** Pin `--spi-import--dir--strategy=IGNORE_EXISTING` in the compose
+command, so a restart is a no-op once the realm exists. The env template defaults
+the same value, and `check-env-templates.sh` fails if either is missing.
+
+**Consequences.** Re-importing a changed template into an existing realm now
+requires deleting the realm deliberately. That is the correct direction: a
+destructive operation must be chosen, not inherited from a default.
+
+**Revisit never.**
+
+---
+
+## ADR-20 — Lab prerequisites live in an overlay; the base file must stay startable
+
+**Status:** Accepted (corrects a near-miss)
+
+**Context.** Phase 1B needed three things in `deploy/identity/compose.yaml`: TLS
+material mounted from the host, an external `edge` network, and an HTTPS listener.
+Putting them in the base file would have made the owner's next ordinary
+`docker compose up -d` fail — the certificates do not exist yet and the network has
+not been created. A preparation step must never break the working installation.
+
+**Decision.** The base file keeps working exactly as before. Everything the lab
+needs goes into `deploy/identity/compose.lab.yml`, applied as an additional `-f`.
+
+One thing is deliberately the exception: the `IGNORE_EXISTING` import strategy
+stays in the **base** file. It is not a lab nicety, it is protection for the realm
+that already exists — a restart without it can delete users, MFA enrolments and the
+client secret (ADR-19). Protection belongs where it applies, not where it is
+convenient.
+
+**Consequences.** Two commands instead of one while testing SSO. In exchange, the
+owner can enable and disable the lab without touching a working project, and
+`check-security.sh` now fails if the base gains a required TLS path or an external
+network.
+
+**Revisit never.**
+
+## ADR-21 — The lab repository does not fork into two compose files per project
+
+**Status:** Accepted
+
+**Context.** Splitting `deploy/single-user` the same way as identity was
+considered and rejected: that project is *itself* opt-in, has no working
+predecessor to protect, and is not started by anyone by accident. Splitting it
+would double the file count for no safety gain.
+
+**Decision.** Only `deploy/identity` gets an overlay, because only it has a
+running installation behind it. `deploy/single-user` stays a single compose file.
+
+**Consequences.** The rule is "an overlay exists where a working service must
+survive the preparation", not "every project gets a lab variant".
+
+**Revisit never.**

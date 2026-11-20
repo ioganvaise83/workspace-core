@@ -252,7 +252,7 @@ test('no email-domain admission is configured', () => {
 });
 
 test('realm template disables self-registration', () => {
-  const realm = JSON.parse(fs.readFileSync(path.join(ROOT, 'deploy/identity/config/dsh-single-user-realm.json'), 'utf8'));
+  const realm = JSON.parse(fs.readFileSync(path.join(ROOT, 'deploy/identity/config/personal-ai-realm.json'), 'utf8'));
   assert.equal(realm.registrationAllowed, false, 'self-registration is off');
   assert.equal(realm.resetPasswordAllowed, false, 'self-service password reset is off');
   assert.equal(realm.bruteForceProtected, true, 'brute-force protection is on');
@@ -266,7 +266,7 @@ test('realm template disables self-registration', () => {
 // ---------------------------------------------------------------------------
 
 test('realm placeholders are supplied to the Keycloak container', () => {
-  const realm = fs.readFileSync(path.join(ROOT, 'deploy/identity/config/dsh-single-user-realm.json'), 'utf8');
+  const realm = fs.readFileSync(path.join(ROOT, 'deploy/identity/config/personal-ai-realm.json'), 'utf8');
   const placeholders = [...realm.matchAll(/\$\{([A-Z0-9_]+)\}/g)].map((match) => match[1]);
   assert.ok(placeholders.length > 0, 'the template actually uses placeholders');
 

@@ -34,7 +34,7 @@ section '1. Files exist'
 # ---------------------------------------------------------------------------
 for file in \
   "$IDENTITY/compose.yaml" "$IDENTITY/env.example" \
-  "$IDENTITY/config/dsh-single-user-realm.json" \
+  "$IDENTITY/config/personal-ai-realm.json" \
   "$SINGLE/compose.yaml" "$SINGLE/env.example" \
   "$SINGLE/nginx/nginx.conf.template" "$SINGLE/nginx/entrypoint.sh" \
   "$SINGLE/oauth2-proxy/oauth2-proxy.cfg" "$SINGLE/oauth2-proxy/allowed-subjects.txt" \
@@ -337,7 +337,69 @@ if grep -qE 'cookie_httponly = true' "$SINGLE/oauth2-proxy/oauth2-proxy.cfg"; th
 else
   fail 'oauth2-proxy cookie is not HttpOnly'
 fi
-# HSTS must be opt-in, never on by default.
+# TLS verification must never be relaxed to make the lab work.
+if grep -qE 'insecure_oidc_skip_issuer_verification[[:space:]]*=[[:space:]]*true' "$SINGLE/oauth2-proxy/oauth2-proxy.cfg"; then
+  fail 'oauth2-proxy disables issuer verification'
+else
+  pass 'oauth2-proxy verifies the issuer'
+fi
+if grep -qE 'ssl_upstream_insecure_skip_verify|insecure_skip_verify' "$SINGLE/oauth2-proxy/oauth2-proxy.cfg"; then
+  fail 'oauth2-proxy disables upstream TLS verification'
+else
+  pass 'oauth2-proxy does not skip upstream TLS verification'
+fi
+if grep -qE 'provider_ca_files' "$SINGLE/oauth2-proxy/oauth2-proxy.cfg"; then
+  pass 'oauth2-proxy trusts an explicit CA, so verification can stay on'
+else
+  fail 'no provider_ca_files; the local Keycloak origin cannot be verified'
+fi
+
+# The local CA must be mounted read-only and never baked into an image.
+if grep -qE 'local-ca\.crt:ro' "$SINGLE/compose.yaml"; then
+  pass 'the local CA is mounted read-only'
+else
+  fail 'the local CA is not mounted read-only into oauth2-proxy'
+fi
+
+# Keycloak serves HTTPS itself: the issuer origin must be the same on both sides.
+# Keycloak's TLS lives in the lab overlay, not the base file, so that enabling the
+# lab cannot break the owner's working `compose.yaml`. Check both places.
+if grep -qE -- '--https-certificate-file' "$IDENTITY/compose.lab.yml" 2>/dev/null; then
+  pass 'Keycloak terminates TLS on its own listener (lab overlay)'
+else
+  fail 'Keycloak has no TLS listener; the issuer origin cannot be consistent'
+fi
+
+# The base must stay startable without the lab prerequisites: no required TLS
+# directory and no external network that may not exist yet.
+if grep -qE 'KC_TLS_DIR:\?' "$IDENTITY/compose.yaml"; then
+  fail 'the base compose requires TLS material, so an ordinary up -d breaks until the lab is set up'
+else
+  pass 'the base compose needs no TLS material'
+fi
+if grep -qE 'external: true' "$IDENTITY/compose.yaml"; then
+  fail 'the base compose depends on an external network, so an ordinary up -d breaks until it is created'
+else
+  pass 'the base compose needs no external network'
+fi
+
+# The realm-destroying import default must be fixed in the BASE, because it
+# protects the realm on every ordinary restart, not only in the lab.
+# Match a real command-line directive, not the explanatory comment: comments in
+# this file discuss IGNORE_EXISTING at length, and grepping the whole file would
+# pass even after the directive was deleted.
+if grep -vE '^[[:space:]]*#' "$IDENTITY/compose.yaml" | grep -qE '^[[:space:]]*- --spi-import--dir--strategy='; then
+  pass 'the base compose pins IGNORE_EXISTING (protects any restart)'
+else
+  fail 'the base compose does not pin the import strategy; a plain restart can delete the realm'
+fi
+if grep -qE 'KC_HOSTNAME=https://' "$IDENTITY/env.example" 2>/dev/null; then
+  pass 'the Keycloak origin in the template is https'
+else
+  fail 'the Keycloak origin in the template is not https'
+fi
+
+HSTS
 if grep -q 'DSH_HSTS_DIRECTIVE' "$SINGLE/nginx/nginx.conf.template" && \
    grep -q 'DSH_HSTS_DIRECTIVE:-' "$SINGLE/compose.yaml"; then
   pass 'HSTS is opt-in via configuration'
